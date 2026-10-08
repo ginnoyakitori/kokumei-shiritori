@@ -770,6 +770,8 @@ function analyzeStateCached(
 
     return result;
 }
+
+
 /* =========================================================
    完全解析(exact-solver)による局面評価
 ========================================================= */
@@ -810,12 +812,19 @@ function createExactAnalysisSolver(settings) {
  * 完全解析で局面を評価する。
  *
  * 戻り値:
- *   null      解析できない(特殊ルール・上限到達・時間超過・エラー)
- *   オブジェクト 勝敗が確定した評価
+ *   null      解析できない
+ *             (特殊ルール・上限到達・時間超過・エラー)
+ *
+ *   オブジェクト
+ *             勝敗が確定した評価
  *
  * winning は「現在の手番側が勝つか」。
- * 手番側が負ける局面の bestMove / distance は意味を持たないため
- * それぞれ null にする。
+ *
+ * 勝勢局面:
+ *   最短で勝つ手を bestMove / distance にする。
+ *
+ * 敗勢局面:
+ *   負けるまで最も長く粘れる手を bestMove / distance にする。
  */
 function analyzeStateExact(state, context) {
     if (!context?.solver) {
@@ -832,11 +841,19 @@ function analyzeStateExact(state, context) {
     let analysis;
 
     try {
-        analysis = context.solver.analyzePosition({
-            requiredLetter: state.currentLetter,
-            usedWords: state.usedWords ?? [],
-            nEndCount: Number(state.nEndCount ?? 0)
-        });
+        analysis =
+            context.solver.analyzePosition({
+                requiredLetter:
+                    state.currentLetter,
+
+                usedWords:
+                    state.usedWords ?? [],
+
+                nEndCount:
+                    Number(
+                        state.nEndCount ?? 0
+                    )
+            });
     } catch (error) {
         console.error(
             "[analyzer] exact-solverの解析に失敗しました。",
@@ -850,28 +867,34 @@ function analyzeStateExact(state, context) {
         return null;
     }
 
-    const winning = analysis.winning === true;
+    const winning =
+        analysis.winning === true;
 
     return {
         winning,
 
+        /*
+         * 勝勢なら最短勝利距離、
+         * 敗勢なら最長抵抗距離。
+         */
         distance:
-            winning
-                ? analysis.distance
-                : null,
+            analysis.distance,
 
+        /*
+         * 勝勢なら勝ちを最短化する手、
+         * 敗勢なら負けを最長化する抵抗手。
+         */
         bestMove:
-            winning
-                ? analysis.bestMove
-                : null,
+            analysis.bestMove,
 
         principalVariation:
-            winning
-                ? analysis.principalVariation
-                : [],
+            analysis.principalVariation ?? [],
 
-        limited: false,
-        exact: true,
+        limited:
+            false,
+
+        exact:
+            true,
 
         analyzedNodeCount:
             analysis.statistics?.visitedStates ?? 0
@@ -889,7 +912,10 @@ function analyzeStateAuto(
     context
 ) {
     return (
-        analyzeStateExact(state, context) ??
+        analyzeStateExact(
+            state,
+            context
+        ) ??
         analyzeStateCached(
             state,
             settings,
@@ -898,6 +924,7 @@ function analyzeStateAuto(
         )
     );
 }
+
 
 /* =========================================================
    初期局面
@@ -965,6 +992,12 @@ function analyzeInitialPosition(
 
                 limited:
                     false,
+
+                /*
+                 * 初期局面も完全解析済みであることを明示する。
+                 */
+                exact:
+                    true,
 
                 analyzedNodeCount:
                     exactResult
@@ -1047,6 +1080,9 @@ function analyzeInitialPosition(
 
         limited,
 
+        exact:
+            result.exact === true,
+
         analyzedNodeCount:
             result.analyzedNodeCount,
 
@@ -1073,9 +1109,11 @@ function analyzeInitialPosition(
     };
 }
 
+
 /* =========================================================
    手の評価コメント
 ========================================================= */
+
 function createMoveComment(move) {
     if (move.immediateLoss) {
         return (
@@ -1120,44 +1158,54 @@ function createMoveComment(move) {
 
     /*
      * 完全解析で、手番側がすでに負けている局面。
-     * どの手を選んでも結果は変わらない。
+     *
+     * この場合の bestMove は
+     * 「勝つための手」ではなく、
+     * 「負けるまでの手数を最大化する最善の抵抗手」。
      */
     if (
-    move.exact &&
-    move.winningPlayerBefore !== move.player
-) {
-    const best =
-        move.bestMove?.word ??
-        move.bestMove?.name ??
-        "";
+        move.exact &&
+        move.winningPlayerBefore !== move.player
+    ) {
+        const best =
+            move.bestMove?.word ??
+            move.bestMove?.name ??
+            "";
 
-    if (move.wasBestMove && best) {
-        return (
-            `${move.player}は必敗局面ですが、` +
-            `負けるまでの手数を最大化する最善の抵抗手「${best}」を選びました。` +
-            (
-                Number.isFinite(move.optimalDistance)
-                    ? `最善応手に対して${move.optimalDistance}手粘れます。`
-                    : ""
+        if (
+            move.wasBestMove &&
+            best
+        ) {
+            return (
+                `${move.player}は必敗局面ですが、` +
+                `負けるまでの手数を最大化する最善の抵抗手「${best}」を選びました。` +
+                (
+                    Number.isFinite(
+                        move.optimalDistance
+                    )
+                        ? `最善応手に対して${move.optimalDistance}手粘れます。`
+                        : ""
+                )
+            );
+        }
+
+        return best
+            ? (
+                `${move.player}は必敗局面です。` +
+                `最善の抵抗手は「${best}」で、` +
+                (
+                    Number.isFinite(
+                        move.optimalDistance
+                    )
+                        ? `最善応手に対して${move.optimalDistance}手粘れます。`
+                        : "できるだけ長く粘れます。"
+                )
             )
-        );
+            : (
+                `${move.player}は必敗局面です。` +
+                "最善の抵抗手を特定できませんでした。"
+            );
     }
-
-    return best
-        ? (
-            `${move.player}は必敗局面です。` +
-            `最善の抵抗手は「${best}」で、` +
-            (
-                Number.isFinite(move.optimalDistance)
-                    ? `最善応手に対して${move.optimalDistance}手粘れます。`
-                    : "できるだけ長く粘れます。"
-            )
-        )
-        : (
-            `${move.player}は必敗局面です。` +
-            "最善の抵抗手を特定できませんでした。"
-        );
-}
 
     if (move.wasBestMove) {
         return (
@@ -1195,6 +1243,7 @@ function createMoveComment(move) {
     );
 }
 
+
 /* =========================================================
    棋譜の各手を解析
 ========================================================= */
@@ -1219,10 +1268,19 @@ function analyzeMoves(
         initialAnalysis.state;
 
     let state = {
-        currentLetter: initialState.currentLetter,
-        usedWords: [...initialState.usedWords],
-        history: [...initialState.history],
-        nEndCount: Number(initialState.nEndCount ?? 0)
+        currentLetter:
+            initialState.currentLetter,
+
+        usedWords:
+            [...initialState.usedWords],
+
+        history:
+            [...initialState.history],
+
+        nEndCount:
+            Number(
+                initialState.nEndCount ?? 0
+            )
     };
 
     let firstTurningPoint = null;
@@ -1232,12 +1290,23 @@ function analyzeMoves(
      * 初期解析の結果をそのまま利用する。
      */
     let previousAfterAnalysis = {
-        winning: initialAnalysis.winning,
-        distance: initialAnalysis.distance,
-        bestMove: initialAnalysis.bestMove,
-        limited: initialAnalysis.limited,
-        exact: initialAnalysis.exact === true,
-        analyzedNodeCount: initialAnalysis.analyzedNodeCount
+        winning:
+            initialAnalysis.winning,
+
+        distance:
+            initialAnalysis.distance,
+
+        bestMove:
+            initialAnalysis.bestMove,
+
+        limited:
+            initialAnalysis.limited,
+
+        exact:
+            initialAnalysis.exact === true,
+
+        analyzedNodeCount:
+            initialAnalysis.analyzedNodeCount
     };
 
     for (
@@ -1245,12 +1314,15 @@ function analyzeMoves(
         index < history.length;
         index += 1
     ) {
-        const recorded = history[index];
+        const recorded =
+            history[index];
 
         const player =
             recorded.player
                 ? (
-                    playerMap.get(recorded.player) ??
+                    playerMap.get(
+                        recorded.player
+                    ) ??
                     getTurnName(index)
                 )
                 : getTurnName(index);
@@ -1281,15 +1353,31 @@ function analyzeMoves(
 
         if (!applied.valid) {
             moves.push({
-                turnNumber: index + 1,
+                turnNumber:
+                    index + 1,
+
                 player,
-                actualWord: recorded.word,
-                requiredLetter: state.currentLetter,
-                valid: false,
-                error: applied.reason,
-                positionBefore: beforeEval.position,
-                bestMove: before.bestMove,
-                wasBestMove: false
+
+                actualWord:
+                    recorded.word,
+
+                requiredLetter:
+                    state.currentLetter,
+
+                valid:
+                    false,
+
+                error:
+                    applied.reason,
+
+                positionBefore:
+                    beforeEval.position,
+
+                bestMove:
+                    before.bestMove,
+
+                wasBestMove:
+                    false
             });
 
             break;
@@ -1299,36 +1387,79 @@ function analyzeMoves(
          * 「ン」または重複による即負け。
          */
         if (applied.terminalLoss) {
-            const winner = getOpponentName(player);
+            const winner =
+                getOpponentName(
+                    player
+                );
 
             const result = {
-                turnNumber: index + 1,
+                turnNumber:
+                    index + 1,
+
                 player,
-                actualWord: applied.entry.name,
-                reading: applied.entry.reading,
-                requiredLetter: state.currentLetter,
-                nextLetter: "",
-                valid: true,
-                immediateLoss: true,
-                lossReason: applied.reason,
-                positionBefore: beforeEval.position,
-                positionAfter: `${winner}勝利`,
-                winningPlayerBefore: beforeEval.winningPlayer,
-                winningPlayerAfter: winner,
-                bestMove: before.bestMove,
-                wasBestMove: false,
-                optimalDistance: before.distance,
-                limited: before.limited === true,
-                exact: before.exact === true,
+
+                actualWord:
+                    applied.entry.name,
+
+                reading:
+                    applied.entry.reading,
+
+                requiredLetter:
+                    state.currentLetter,
+
+                nextLetter:
+                    "",
+
+                valid:
+                    true,
+
+                immediateLoss:
+                    true,
+
+                lossReason:
+                    applied.reason,
+
+                positionBefore:
+                    beforeEval.position,
+
+                positionAfter:
+                    `${winner}勝利`,
+
+                winningPlayerBefore:
+                    beforeEval.winningPlayer,
+
+                winningPlayerAfter:
+                    winner,
+
+                bestMove:
+                    before.bestMove,
+
+                wasBestMove:
+                    false,
+
+                optimalDistance:
+                    before.distance,
+
+                limited:
+                    before.limited === true,
+
+                exact:
+                    before.exact === true,
 
                 lostWinningPosition:
                     before.limited !== true &&
-                    beforeEval.winningPlayer === player
+                    beforeEval.winningPlayer ===
+                        player
             };
 
-            result.comment = createMoveComment(result);
+            result.comment =
+                createMoveComment(
+                    result
+                );
 
-            moves.push(result);
+            moves.push(
+                result
+            );
 
             /*
              * 即負けは確定的な終局なので、
@@ -1337,21 +1468,35 @@ function analyzeMoves(
             firstTurningPoint =
                 firstTurningPoint ??
                 {
-                    turnNumber: index + 1,
+                    turnNumber:
+                        index + 1,
+
                     player,
-                    actualWord: applied.entry.name,
-                    bestMove: before.bestMove,
-                    positionBefore: beforeEval.position,
-                    positionAfter: `${winner}勝利`,
-                    immediateLoss: true
+
+                    actualWord:
+                        applied.entry.name,
+
+                    bestMove:
+                        before.bestMove,
+
+                    positionBefore:
+                        beforeEval.position,
+
+                    positionAfter:
+                        `${winner}勝利`,
+
+                    immediateLoss:
+                        true
                 };
 
-            state = applied.state;
+            state =
+                applied.state;
 
             break;
         }
 
-        const nextState = applied.state;
+        const nextState =
+            applied.state;
 
         /*
          * 指した後の局面。
@@ -1369,7 +1514,8 @@ function analyzeMoves(
         /*
          * この結果は、次の手の指す前の解析結果と同じ。
          */
-        previousAfterAnalysis = after;
+        previousAfterAnalysis =
+            after;
 
         const afterEval =
             positionLabel(
@@ -1383,35 +1529,44 @@ function analyzeMoves(
             after.exact === true;
 
         const moverWasWinning =
-            beforeEval.winningPlayer === player;
+            beforeEval.winningPlayer ===
+            player;
 
         const moverStillWinning =
-            afterEval.winningPlayer === player;
+            afterEval.winningPlayer ===
+            player;
 
         /*
          * 完全解析どうしの場合:
-         *   勝ちの局面で勝ちを維持した手はすべて最善手。
-         *   (勝ち手が複数ある場合に、
-         *    solverが挙げた1手だけを正解とみなさない)
+         *
+         *   勝ちの局面で勝ちを維持した手は
+         *   すべて最善手。
+         *
+         *   敗勢局面では、
+         *   solver が選んだ
+         *   「最も長く粘れる手」と一致した場合を
+         *   最善抵抗手とする。
+         *
          * それ以外の場合:
          *   解析が挙げた最善手と同じ単語かどうか。
          */
         const wasBestMove =
-    bothExact
-        ? (
-            moverWasWinning
-                ? moverStillWinning
+            bothExact
+                ? (
+                    moverWasWinning
+                        ? moverStillWinning
+                        : isSameWord(
+                            recorded.word,
+                            before.bestMove,
+                            settings
+                        )
+                )
                 : isSameWord(
                     recorded.word,
                     before.bestMove,
                     settings
-                )
-        )
-        : isSameWord(
-            recorded.word,
-            before.bestMove,
-            settings
-        );
+                );
+
         const evaluationChanged =
             beforeEval.winningPlayer !==
             afterEval.winningPlayer;
@@ -1436,35 +1591,72 @@ function analyzeMoves(
             !wasBestMove;
 
         const result = {
-            turnNumber: index + 1,
+            turnNumber:
+                index + 1,
+
             player,
-            actualWord: applied.entry.name,
-            reading: applied.entry.reading,
-            requiredLetter: state.currentLetter,
-            nextLetter: nextState.currentLetter,
-            valid: true,
-            positionBefore: beforeEval.position,
-            positionAfter: afterEval.position,
-            winningPlayerBefore: beforeEval.winningPlayer,
-            winningPlayerAfter: afterEval.winningPlayer,
-            bestMove: before.bestMove,
+
+            actualWord:
+                applied.entry.name,
+
+            reading:
+                applied.entry.reading,
+
+            requiredLetter:
+                state.currentLetter,
+
+            nextLetter:
+                nextState.currentLetter,
+
+            valid:
+                true,
+
+            positionBefore:
+                beforeEval.position,
+
+            positionAfter:
+                afterEval.position,
+
+            winningPlayerBefore:
+                beforeEval.winningPlayer,
+
+            winningPlayerAfter:
+                afterEval.winningPlayer,
+
+            bestMove:
+                before.bestMove,
+
             wasBestMove,
-            optimalDistance: before.distance,
+
+            /*
+             * 勝勢なら最短勝利手数。
+             * 敗勢なら最長抵抗手数。
+             */
+            optimalDistance:
+                before.distance,
 
             limited:
                 before.limited === true ||
                 after.limited === true,
 
-            exact: bothExact,
+            exact:
+                bothExact,
 
             evaluationChanged,
+
             evaluationChangedUnderLimit,
+
             lostWinningPosition
         };
 
-        result.comment = createMoveComment(result);
+        result.comment =
+            createMoveComment(
+                result
+            );
 
-        moves.push(result);
+        moves.push(
+            result
+        );
 
         /*
          * 限定解析の評価変動は
@@ -1475,25 +1667,41 @@ function analyzeMoves(
             lostWinningPosition
         ) {
             firstTurningPoint = {
-                turnNumber: index + 1,
+                turnNumber:
+                    index + 1,
+
                 player,
-                actualWord: applied.entry.name,
-                bestMove: before.bestMove,
-                positionBefore: beforeEval.position,
-                positionAfter: afterEval.position
+
+                actualWord:
+                    applied.entry.name,
+
+                bestMove:
+                    before.bestMove,
+
+                positionBefore:
+                    beforeEval.position,
+
+                positionAfter:
+                    afterEval.position
             };
         }
 
-        state = nextState;
+        state =
+            nextState;
     }
 
     return {
         moves,
-        finalState: state,
+
+        finalState:
+            state,
+
         firstTurningPoint,
+
         moveOptions
     };
 }
+
 
 /* =========================================================
    実際の勝者
@@ -1705,17 +1913,25 @@ function createSummary(
 /* =========================================================
    対局全体の解析
 ========================================================= */
+
 function analyze(
     rawHistory,
     rawSettings = {},
     explicitStartLetter = "",
     actualGameResult = {}
 ) {
-    const startedAt = Date.now();
+    const startedAt =
+        Date.now();
 
-    const settings = normalizeSettings(rawSettings);
+    const settings =
+        normalizeSettings(
+            rawSettings
+        );
 
-    const history = normalizeHistory(rawHistory);
+    const history =
+        normalizeHistory(
+            rawHistory
+        );
 
     const startLetter =
         resolveStartLetter(
@@ -1726,10 +1942,16 @@ function analyze(
 
     if (!startLetter) {
         return {
-            success: false,
-            error: "開始文字を特定できないため、解析できませんでした。",
+            success:
+                false,
+
+            error:
+                "開始文字を特定できないため、解析できませんでした。",
+
             settings,
-            historyLength: history.length
+
+            historyLength:
+                history.length
         };
     }
 
@@ -1742,24 +1964,39 @@ function analyze(
 
     if (startWords.length === 0) {
         return {
-            success: false,
-            error: `開始文字「${startLetter}」から始まる単語がありません。`,
+            success:
+                false,
+
+            error:
+                `開始文字「${startLetter}」から始まる単語がありません。`,
+
             startLetter,
+
             settings,
-            historyLength: history.length
+
+            historyLength:
+                history.length
         };
     }
 
     /*
-     * 1回の対局解析の中で、局面解析結果と
-     * 完全解析ソルバーを再利用する。
+     * 1回の対局解析の中で、
+     * 局面解析結果と完全解析ソルバーを再利用する。
      */
-    const cache = new Map();
+    const cache =
+        new Map();
 
     const context = {
-        solver: createExactAnalysisSolver(settings),
+        solver:
+            createExactAnalysisSolver(
+                settings
+            ),
+
         startedAt,
-        budgetMilliseconds: EXACT_ANALYSIS.budgetMilliseconds
+
+        budgetMilliseconds:
+            EXACT_ANALYSIS
+                .budgetMilliseconds
     };
 
     const initial =
@@ -1770,7 +2007,10 @@ function analyze(
             context
         );
 
-    const playerMap = createPlayerMap(history);
+    const playerMap =
+        createPlayerMap(
+            history
+        );
 
     const detail =
         analyzeMoves(
@@ -1793,47 +2033,78 @@ function analyze(
             playerMap
         );
 
-    const finalState = detail.finalState;
+    const finalState =
+        detail.finalState;
 
-    const finalLetter = finalState.currentLetter ?? "";
+    const finalLetter =
+        finalState.currentLetter ??
+        "";
 
     return {
-        success: true,
+        success:
+            true,
 
         startLetter,
+
         settings,
 
-        verdict: initial.verdict,
-        winningPlayer: initial.winningPlayer,
-        firstPlayerWinning: initial.winning,
-        limited: initial.limited,
-        optimalDistance: initial.distance,
-        bestMove: initial.bestMove,
+        verdict:
+            initial.verdict,
+
+        winningPlayer:
+            initial.winningPlayer,
+
+        firstPlayerWinning:
+            initial.winning,
+
+        limited:
+            initial.limited,
+
+        optimalDistance:
+            initial.distance,
+
+        bestMove:
+            initial.bestMove,
 
         actualWinner,
 
         actualResultReason:
-            String(actualGameResult?.reason ?? ""),
+            String(
+                actualGameResult?.reason ??
+                ""
+            ),
 
-        historyLength: history.length,
+        historyLength:
+            history.length,
 
-        moveAnalysis: detail.moves,
-        firstTurningPoint: detail.firstTurningPoint,
+        moveAnalysis:
+            detail.moves,
+
+        firstTurningPoint:
+            detail.firstTurningPoint,
 
         finalState: {
-            currentLetter: finalLetter,
+            currentLetter:
+                finalLetter,
 
             usedWordCount:
-                finalState.usedWords?.length ?? 0,
+                finalState
+                    .usedWords
+                    ?.length ??
+                0,
 
             nEndCount:
-                Number(finalState.nEndCount ?? 0),
+                Number(
+                    finalState.nEndCount ??
+                    0
+                ),
 
             availableWordCount:
                 finalLetter
                     ? logic.getAvailableWords(
                         finalLetter,
-                        finalState.usedWords ?? [],
+                        finalState.usedWords ??
+                            [],
                         settings
                     ).length
                     : 0
@@ -1847,17 +2118,29 @@ function analyze(
             ),
 
         analysisInfo: {
-            elapsedMilliseconds: Date.now() - startedAt,
-            cacheSize: cache.size,
-            cpuCacheSize: cpu.getCacheSize(),
-            analyzedNodeCount: initial.analyzedNodeCount,
-            limited: initial.limited,
+            elapsedMilliseconds:
+                Date.now() -
+                startedAt,
 
-            exactSolverUsed: context.solver !== null,
+            cacheSize:
+                cache.size,
+
+            cpuCacheSize:
+                cpu.getCacheSize(),
+
+            analyzedNodeCount:
+                initial.analyzedNodeCount,
+
+            limited:
+                initial.limited,
+
+            exactSolverUsed:
+                context.solver !== null,
 
             exactMoveCount:
                 detail.moves.filter(
-                    move => move.exact === true
+                    move =>
+                        move.exact === true
                 ).length,
 
             initialOptions: {
@@ -1870,6 +2153,7 @@ function analyze(
         }
     };
 }
+
 
 /* =========================================================
    特定局面の解析
@@ -1921,7 +2205,8 @@ function analyzePosition({
 
     const baseOptions =
         options &&
-        typeof options === "object"
+        typeof options ===
+            "object"
             ? options
             : getAnalysisOptions(
                 normalizedSettings,
