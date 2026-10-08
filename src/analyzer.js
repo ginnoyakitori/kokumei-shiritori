@@ -1123,14 +1123,41 @@ function createMoveComment(move) {
      * どの手を選んでも結果は変わらない。
      */
     if (
-        move.exact &&
-        move.winningPlayerBefore !== move.player
-    ) {
+    move.exact &&
+    move.winningPlayerBefore !== move.player
+) {
+    const best =
+        move.bestMove?.word ??
+        move.bestMove?.name ??
+        "";
+
+    if (move.wasBestMove && best) {
         return (
-            `この局面は${move.player}の必敗で、` +
-            "どの手を選んでも結果は変わりません。"
+            `${move.player}は必敗局面ですが、` +
+            `負けるまでの手数を最大化する最善の抵抗手「${best}」を選びました。` +
+            (
+                Number.isFinite(move.optimalDistance)
+                    ? `最善応手に対して${move.optimalDistance}手粘れます。`
+                    : ""
+            )
         );
     }
+
+    return best
+        ? (
+            `${move.player}は必敗局面です。` +
+            `最善の抵抗手は「${best}」で、` +
+            (
+                Number.isFinite(move.optimalDistance)
+                    ? `最善応手に対して${move.optimalDistance}手粘れます。`
+                    : "できるだけ長く粘れます。"
+            )
+        )
+        : (
+            `${move.player}は必敗局面です。` +
+            "最善の抵抗手を特定できませんでした。"
+        );
+}
 
     if (move.wasBestMove) {
         return (
@@ -1370,14 +1397,21 @@ function analyzeMoves(
          *   解析が挙げた最善手と同じ単語かどうか。
          */
         const wasBestMove =
-            bothExact
-                ? (moverWasWinning && moverStillWinning)
+    bothExact
+        ? (
+            moverWasWinning
+                ? moverStillWinning
                 : isSameWord(
                     recorded.word,
                     before.bestMove,
                     settings
-                );
-
+                )
+        )
+        : isSameWord(
+            recorded.word,
+            before.bestMove,
+            settings
+        );
         const evaluationChanged =
             beforeEval.winningPlayer !==
             afterEval.winningPlayer;

@@ -1,5 +1,7 @@
 "use strict";
+
 const logic = require("./logic");
+
 const {
     normalizeRuleSettings: normalizeSettings
 } = require("./settings");
@@ -15,8 +17,6 @@ const OUTCOME = Object.freeze({
     WIN: "WIN",
     LOSE: "LOSE"
 });
-
-
 
 function createExactSolver(
     rawSettings = {},
@@ -341,6 +341,30 @@ function createExactSolver(
         table.fill(-1);
     }
 
+    /*
+     * 勝敗が確定した局面から終局までの最適距離。
+     *
+     * WIN:
+     *   自分が最短で勝つ手数
+     *
+     * LOSE:
+     *   相手が最善を尽くしても、
+     *   最も長く粘れる手数
+     */
+    const distanceMemo =
+        Array.from(
+            {
+                length:
+                    letterIndex.idToLetter.length
+            },
+            () => {
+                return [
+                    new Map(),
+                    new Map()
+                ];
+            }
+        );
+
     let memoStateCount = 0;
     let visitedStates = 0;
     let cacheHits = 0;
@@ -383,8 +407,8 @@ function createExactSolver(
             0n;
 
         const availableMask =
-            legalMask ^
-            (legalMask & usedMask);
+            legalMask &
+            ~usedMask;
 
         if (availableMask === 0n) {
             memoSet(
@@ -407,8 +431,8 @@ function createExactSolver(
             0n;
 
         const terminalAvailable =
-            terminalMask ^
-            (terminalMask & usedMask);
+            terminalMask &
+            ~usedMask;
 
         if (terminalAvailable !== 0n) {
             terminalShortcutHits += 1;
@@ -468,8 +492,8 @@ function createExactSolver(
                         : killer.childLegalMask1;
 
                 const childAvailable =
-                    childLegalMask ^
-                    (childLegalMask & nextMask);
+                    childLegalMask &
+                    ~nextMask;
 
                 if (childAvailable === 0n) {
                     childTerminalHits += 1;
@@ -499,8 +523,8 @@ function createExactSolver(
                         : killer.childTerminalMask1;
 
                 const childTerminalAvailable =
-                    childTerminalMask ^
-                    (childTerminalMask & nextMask);
+                    childTerminalMask &
+                    ~nextMask;
 
                 if (childTerminalAvailable !== 0n) {
                     childTerminalHits += 1;
@@ -599,8 +623,8 @@ function createExactSolver(
                     : move.childLegalMask1;
 
             const childAvailable =
-                childLegalMask ^
-                (childLegalMask & nextMask);
+                childLegalMask &
+                ~nextMask;
 
             if (childAvailable === 0n) {
                 childTerminalHits += 1;
@@ -633,8 +657,8 @@ function createExactSolver(
                     : move.childTerminalMask1;
 
             const childTerminalAvailable =
-                childTerminalMask ^
-                (childTerminalMask & nextMask);
+                childTerminalMask &
+                ~nextMask;
 
             if (childTerminalAvailable !== 0n) {
                 childTerminalHits += 1;
@@ -756,6 +780,200 @@ function createExactSolver(
         ) - 1;
     }
 
+    /*
+     * 勝敗が確定している局面について、
+     * 終局までの最適手数を求める。
+     *
+     * WIN:
+     *   最短で勝つ。
+     *
+     * LOSE:
+     *   相手の最善応手に対して、
+     *   最も長く粘る。
+     */
+    function getDistance(
+        letterId,
+        usedMask,
+        nState
+    ) {
+        const cached =
+            distanceMemo[letterId][nState].get(
+                usedMask
+            );
+
+        if (cached !== undefined) {
+            return cached;
+        }
+
+        const packed =
+            memoGet(
+                letterId,
+                nState,
+                usedMask
+            );
+
+        if (packed === undefined) {
+            return null;
+        }
+
+        const result =
+            decodeMemoResult(
+                packed
+            );
+
+        if (result === RESULT.UNKNOWN) {
+            return null;
+        }
+
+        const legalMask =
+            legalMoveMasks[nState][letterId] ??
+            0n;
+
+        const availableMask =
+            legalMask &
+            ~usedMask;
+
+        if (availableMask === 0n) {
+            distanceMemo[letterId][nState].set(
+                usedMask,
+                0
+            );
+
+            return 0;
+        }
+
+        let bestDistance =
+            result === RESULT.WIN
+                ? Number.POSITIVE_INFINITY
+                : -1;
+
+        const moves =
+            wordsByFirstLetterId[letterId] ??
+            [];
+
+        for (const move of moves) {
+            if (
+                (
+                    availableMask &
+                    move.bit
+                ) === 0n
+            ) {
+                continue;
+            }
+
+            if (Date.now() >= deadline) {
+                stoppedByLimit = true;
+                stopReason = "deadline";
+
+                return null;
+            }
+
+            const nextMask =
+                usedMask |
+                move.usageBit;
+
+            const nextNState =
+                nState === 0
+                    ? move.nextNState0
+                    : move.nextNState1;
+
+            const childLegalMask =
+                nState === 0
+                    ? move.childLegalMask0
+                    : move.childLegalMask1;
+
+            let childResult;
+            let childDistance = 0;
+
+            if (childLegalMask === 0n) {
+                childResult =
+                    RESULT.LOSE;
+            } else {
+                childResult =
+                    solveOutcome(
+                        move.lastLetterId,
+                        nextMask,
+                        nextNState
+                    );
+
+                if (
+                    childResult ===
+                    RESULT.UNKNOWN
+                ) {
+                    return null;
+                }
+
+                childDistance =
+                    getDistance(
+                        move.lastLetterId,
+                        nextMask,
+                        nextNState
+                    );
+
+                if (
+                    childDistance === null
+                ) {
+                    return null;
+                }
+            }
+
+            const totalDistance =
+                1 +
+                childDistance;
+
+            if (
+                result === RESULT.WIN
+            ) {
+                /*
+                 * 勝勢：
+                 * 最短で勝てる手を選ぶ。
+                 */
+                if (
+                    childResult === RESULT.LOSE &&
+                    totalDistance < bestDistance
+                ) {
+                    bestDistance =
+                        totalDistance;
+                }
+            } else if (
+                result === RESULT.LOSE
+            ) {
+                /*
+                 * 敗勢：
+                 * できるだけ長く粘れる手を選ぶ。
+                 */
+                if (
+                    childResult === RESULT.WIN &&
+                    totalDistance > bestDistance
+                ) {
+                    bestDistance =
+                        totalDistance;
+                }
+            }
+        }
+
+        if (
+            !Number.isFinite(bestDistance) ||
+            bestDistance < 0
+        ) {
+            return null;
+        }
+
+        distanceMemo[letterId][nState].set(
+            usedMask,
+            bestDistance
+        );
+
+        return bestDistance;
+    }
+
+    /*
+     * 勝勢：
+     *   最短勝利の手
+     *
+     * 敗勢：
+     *   最長抵抗の手
+     */
     function findBestMove(
         letterId,
         usedMask,
@@ -772,17 +990,135 @@ function createExactSolver(
             return null;
         }
 
-        const moveIndex =
-            decodeMemoMoveIndex(
+        const result =
+            decodeMemoResult(
                 packed
             );
 
-        if (moveIndex < 0) {
+        if (result === RESULT.UNKNOWN) {
             return null;
         }
 
-        return searchWords[moveIndex] ??
-            null;
+        const optimalDistance =
+            getDistance(
+                letterId,
+                usedMask,
+                nState
+            );
+
+        if (optimalDistance === null) {
+            return null;
+        }
+
+        const legalMask =
+            legalMoveMasks[nState][letterId] ??
+            0n;
+
+        const availableMask =
+            legalMask &
+            ~usedMask;
+
+        if (availableMask === 0n) {
+            return null;
+        }
+
+        const moves =
+            wordsByFirstLetterId[letterId] ??
+            [];
+
+        let selectedMove = null;
+
+        for (const move of moves) {
+            if (
+                (
+                    availableMask &
+                    move.bit
+                ) === 0n
+            ) {
+                continue;
+            }
+
+            const nextMask =
+                usedMask |
+                move.usageBit;
+
+            const nextNState =
+                nState === 0
+                    ? move.nextNState0
+                    : move.nextNState1;
+
+            const childLegalMask =
+                nState === 0
+                    ? move.childLegalMask0
+                    : move.childLegalMask1;
+
+            let childResult;
+            let childDistance = 0;
+
+            if (childLegalMask === 0n) {
+                childResult =
+                    RESULT.LOSE;
+            } else {
+                childResult =
+                    solveOutcome(
+                        move.lastLetterId,
+                        nextMask,
+                        nextNState
+                    );
+
+                if (
+                    childResult ===
+                    RESULT.UNKNOWN
+                ) {
+                    continue;
+                }
+
+                childDistance =
+                    getDistance(
+                        move.lastLetterId,
+                        nextMask,
+                        nextNState
+                    );
+
+                if (
+                    childDistance === null
+                ) {
+                    continue;
+                }
+            }
+
+            const totalDistance =
+                1 +
+                childDistance;
+
+            if (
+                totalDistance !==
+                optimalDistance
+            ) {
+                continue;
+            }
+
+            if (
+                result === RESULT.WIN &&
+                childResult !== RESULT.LOSE
+            ) {
+                continue;
+            }
+
+            if (
+                result === RESULT.LOSE &&
+                childResult !== RESULT.WIN
+            ) {
+                continue;
+            }
+
+            selectedMove =
+                move;
+
+            break;
+        }
+
+        return selectedMove;
     }
 
     function buildPrincipalVariation(
@@ -853,10 +1189,12 @@ function createExactSolver(
                     : move.childLegalMask1;
 
             const childAvailable =
-                childLegalMask ^
-                (childLegalMask & nextMask);
+                childLegalMask &
+                ~nextMask;
 
-            if (childAvailable === 0n) {
+            if (
+                childAvailable === 0n
+            ) {
                 break;
             }
 
@@ -934,7 +1272,9 @@ function createExactSolver(
                     normalizedLetter
                 );
 
-        if (letterId === undefined) {
+        if (
+            letterId === undefined
+        ) {
             return {
                 success:
                     true,
@@ -996,8 +1336,39 @@ function createExactSolver(
                 nState
             );
 
-        const bestMove =
+        /*
+         * 勝敗解析と距離解析を分離。
+         *
+         * 勝敗判定でほぼ全時間を使ってしまった場合でも、
+         * 最低限の距離探索時間を確保する。
+         */
+        if (
+            result !== RESULT.UNKNOWN &&
+            Date.now() < deadline
+        ) {
+            deadline =
+                Date.now() +
+                Math.max(
+                    1000,
+                    Math.floor(
+                        options.deadlineMilliseconds /
+                        2
+                    )
+                );
+        }
+
+        const optimalDistance =
             result === RESULT.UNKNOWN
+                ? null
+                : getDistance(
+                    letterId,
+                    usedMask,
+                    nState
+                );
+
+        const bestMove =
+            result === RESULT.UNKNOWN ||
+            optimalDistance === null
                 ? null
                 : findBestMove(
                     letterId,
@@ -1006,14 +1377,14 @@ function createExactSolver(
                 );
 
         const principalVariation =
-            result === RESULT.UNKNOWN
+            result === RESULT.UNKNOWN ||
+            optimalDistance === null
                 ? []
                 : buildPrincipalVariation(
                     letterId,
                     usedMask,
                     nState,
-                    options
-                        .principalVariationLimit
+                    options.principalVariationLimit
                 );
 
         return {
@@ -1044,8 +1415,13 @@ function createExactSolver(
                     isInitial
                 ),
 
+            /*
+             * 「最善手を何手先まで復元できたか」
+             * ではなく、
+             * 実際に計算した最適距離を返す。
+             */
             distance:
-                principalVariation.length,
+                optimalDistance,
 
             bestMove:
                 toPublicMove(
@@ -1082,7 +1458,9 @@ function createExactSolver(
         result,
         bestMove
     ) {
-        if (result === RESULT.UNKNOWN) {
+        if (
+            result === RESULT.UNKNOWN
+        ) {
             return {
                 type:
                     "search-limit",
@@ -1099,8 +1477,12 @@ function createExactSolver(
             ) &
             ~usedMask;
 
-        if (result === RESULT.LOSE) {
-            if (availableMask === 0n) {
+        if (
+            result === RESULT.LOSE
+        ) {
+            if (
+                availableMask === 0n
+            ) {
                 return {
                     type:
                         "no-safe-move",
@@ -1356,7 +1738,11 @@ function createExactSolver(
         let initialMask =
             usedMask;
 
-        if (Array.isArray(usedMask)) {
+        if (
+            Array.isArray(
+                usedMask
+            )
+        ) {
             initialMask =
                 createUsedMask(
                     usedMask
@@ -1429,10 +1815,25 @@ function createExactSolver(
             );
 
         /*
-         * UNKNOWNの場合は最善手を確定しない。
+         * 勝敗が確定している場合は、
+         * 最適距離も計算する。
+         */
+        const optimalDistance =
+            result === RESULT.UNKNOWN
+                ? null
+                : getDistance(
+                    letterId,
+                    initialMask,
+                    normalizedNState
+                );
+
+        /*
+         * UNKNOWNまたは距離不明の場合は、
+         * 最善手を確定しない。
          */
         const bestMove =
-            result === RESULT.UNKNOWN
+            result === RESULT.UNKNOWN ||
+            optimalDistance === null
                 ? null
                 : findBestMove(
                     letterId,
@@ -1441,10 +1842,11 @@ function createExactSolver(
                 );
 
         /*
-         * 必勝進行を後から復元。
+         * 必勝進行・最善抵抗進行を復元。
          */
         const principalVariation =
-            result === RESULT.UNKNOWN
+            result === RESULT.UNKNOWN ||
+            optimalDistance === null
                 ? []
                 : buildPrincipalVariation(
                     letterId,
@@ -1473,7 +1875,7 @@ function createExactSolver(
                 result !== RESULT.UNKNOWN,
 
             distance:
-                principalVariation.length,
+                optimalDistance,
 
             bestMove:
                 bestMove
@@ -1549,6 +1951,17 @@ function createExactSolver(
             byLetter[1].clear();
         }
 
+        /*
+         * 距離解析用メモも必ずクリアする。
+         */
+        for (
+            const byLetter
+            of distanceMemo
+        ) {
+            byLetter[0].clear();
+            byLetter[1].clear();
+        }
+
         memoStateCount = 0;
         visitedStates = 0;
         cacheHits = 0;
@@ -1557,7 +1970,10 @@ function createExactSolver(
         stoppedByLimit = false;
         stopReason = "";
 
-        for (const table of killerMoves) {
+        for (
+            const table
+            of killerMoves
+        ) {
             table.fill(-1);
         }
 
@@ -1630,14 +2046,19 @@ function buildSearchWords(
     const representatives =
         new Map();
 
-    for (const entry of rawWords) {
+    for (
+        const entry
+        of rawWords
+    ) {
         const key =
             `${entry.reading}|` +
             `${entry.firstLetter}|` +
             `${entry.lastLetter}`;
 
         if (
-            !representatives.has(key)
+            !representatives.has(
+                key
+            )
         ) {
             representatives.set(
                 key,
@@ -1653,7 +2074,9 @@ function buildSearchWords(
     ];
 }
 
-function buildLetterIndex(words) {
+function buildLetterIndex(
+    words
+) {
     const letterToId =
         new Map();
 
@@ -1662,7 +2085,9 @@ function buildLetterIndex(words) {
 
     function add(letter) {
         if (
-            !letterToId.has(letter)
+            !letterToId.has(
+                letter
+            )
         ) {
             const id =
                 idToLetter.length;
@@ -1678,9 +2103,17 @@ function buildLetterIndex(words) {
         }
     }
 
-    for (const entry of words) {
-        add(entry.firstLetter);
-        add(entry.lastLetter);
+    for (
+        const entry
+        of words
+    ) {
+        add(
+            entry.firstLetter
+        );
+
+        add(
+            entry.lastLetter
+        );
     }
 
     return {
@@ -1704,20 +2137,30 @@ function buildWordsByFirstLetterId(
             }
         );
 
-    for (const entry of words) {
+    for (
+        const entry
+        of words
+    ) {
         result[
             entry.firstLetterId
-        ].push(entry);
+        ].push(
+            entry
+        );
     }
 
     return result;
 }
 
-function buildReadingMasks(words) {
+function buildReadingMasks(
+    words
+) {
     const result =
         new Map();
 
-    for (const entry of words) {
+    for (
+        const entry
+        of words
+    ) {
         const current =
             result.get(
                 entry.reading
@@ -1749,7 +2192,10 @@ function buildLegalMoveMasks(
         ).fill(0n)
     ];
 
-    for (const entry of words) {
+    for (
+        const entry
+        of words
+    ) {
         if (
             isSafeForNState(
                 entry,
@@ -1796,7 +2242,10 @@ function buildTerminalMasks(
         ).fill(0n)
     ];
 
-    for (const entry of words) {
+    for (
+        const entry
+        of words
+    ) {
         for (
             let nState = 0;
             nState <= 1;
@@ -1825,7 +2274,9 @@ function buildTerminalMasks(
                 ] ??
                 0n;
 
-            if (replies === 0n) {
+            if (
+                replies === 0n
+            ) {
                 masks[nState][
                     entry.firstLetterId
                 ] |=
@@ -1843,7 +2294,10 @@ function prepareStaticOrder(
     legalMoveMasks,
     settings
 ) {
-    for (const entry of words) {
+    for (
+        const entry
+        of words
+    ) {
         const nextNState =
             entry.nextNState0;
 
@@ -1874,31 +2328,33 @@ function prepareStaticOrder(
         const entries
         of wordsByFirstLetterId
     ) {
-        entries.sort((a, b) => {
-            if (
-                a.staticTerminalWin !==
-                b.staticTerminalWin
-            ) {
-                return a.staticTerminalWin
-                    ? -1
-                    : 1;
-            }
+        entries.sort(
+            (a, b) => {
+                if (
+                    a.staticTerminalWin !==
+                    b.staticTerminalWin
+                ) {
+                    return a.staticTerminalWin
+                        ? -1
+                        : 1;
+                }
 
-            if (
-                a.staticReplyCount !==
-                b.staticReplyCount
-            ) {
-                return (
-                    a.staticReplyCount -
+                if (
+                    a.staticReplyCount !==
                     b.staticReplyCount
+                ) {
+                    return (
+                        a.staticReplyCount -
+                        b.staticReplyCount
+                    );
+                }
+
+                return (
+                    a.sourceIndex -
+                    b.sourceIndex
                 );
             }
-
-            return (
-                a.sourceIndex -
-                b.sourceIndex
-            );
-        });
+        );
     }
 }
 
@@ -1907,16 +2363,23 @@ function isSafeForNState(
     nState,
     settings
 ) {
-    if (entry.lastLetter !== "ン") {
+    if (
+        entry.lastLetter !==
+        "ン"
+    ) {
         return true;
     }
 
-    if (settings.nRule === "lose") {
+    if (
+        settings.nRule ===
+        "lose"
+    ) {
         return false;
     }
 
     if (
-        settings.nRule === "once" &&
+        settings.nRule ===
+            "once" &&
         nState === 1
     ) {
         return false;
@@ -1930,11 +2393,15 @@ function getNextNState(
     lastLetter,
     settings
 ) {
-    if (settings.nRule !== "once") {
+    if (
+        settings.nRule !==
+        "once"
+    ) {
         return 0;
     }
 
-    return lastLetter === "ン"
+    return lastLetter ===
+        "ン"
         ? 1
         : nState;
 }
@@ -1943,7 +2410,10 @@ function normalizeNState(
     value,
     settings
 ) {
-    if (settings.nRule !== "once") {
+    if (
+        settings.nRule !==
+        "once"
+    ) {
         return 0;
     }
 
@@ -1986,7 +2456,9 @@ function firstEntryFromMask(
             mask
         );
 
-    if (index < 0) {
+    if (
+        index < 0
+    ) {
         return null;
     }
 
@@ -1997,7 +2469,10 @@ function firstEntryFromMask(
             []
         )
     ) {
-        if (entry.searchIndex === index) {
+        if (
+            entry.searchIndex ===
+            index
+        ) {
             return entry;
         }
     }
@@ -2005,11 +2480,15 @@ function firstEntryFromMask(
     return null;
 }
 
-function bitCount(value) {
+function bitCount(
+    value
+) {
     let count = 0;
     let current = value;
 
-    while (current !== 0n) {
+    while (
+        current !== 0n
+    ) {
         current &=
             current -
             1n;
@@ -2020,7 +2499,9 @@ function bitCount(value) {
     return count;
 }
 
-function toPublicMove(entry) {
+function toPublicMove(
+    entry
+) {
     if (!entry) {
         return null;
     }
@@ -2049,12 +2530,18 @@ function toPublicMove(entry) {
     };
 }
 
-function getOutcomeName(result) {
-    if (result === RESULT.WIN) {
+function getOutcomeName(
+    result
+) {
+    if (
+        result === RESULT.WIN
+    ) {
         return OUTCOME.WIN;
     }
 
-    if (result === RESULT.LOSE) {
+    if (
+        result === RESULT.LOSE
+    ) {
         return OUTCOME.LOSE;
     }
 
@@ -2065,13 +2552,17 @@ function getVerdict(
     result,
     isInitial
 ) {
-    if (result === RESULT.WIN) {
+    if (
+        result === RESULT.WIN
+    ) {
         return isInitial
             ? "先手必勝"
             : "現在手番側の必勝";
     }
 
-    if (result === RESULT.LOSE) {
+    if (
+        result === RESULT.LOSE
+    ) {
         return isInitial
             ? "後手必勝"
             : "現在手番側の必敗";
@@ -2121,7 +2612,9 @@ function powerOfTwo(
 
     let result = 1;
 
-    while (result < wanted) {
+    while (
+        result < wanted
+    ) {
         result *= 2;
     }
 
