@@ -1,4 +1,5 @@
 "use strict";
+
 const logic = require("./logic");
 const {
     normalizeRuleSettings: normalizeSettings
@@ -339,8 +340,13 @@ function createExactSolver(
 
     /*
      * 勝敗が確定した局面から終局までの最適距離。
-     * WIN  : 自分が最短で勝つ手数
-     * LOSE : 相手が最善を尽くしても、最も長く粘れる手数
+     *
+     * WIN:
+     *   自分が最短で勝つ手数
+     *
+     * LOSE:
+     *   相手が最善を尽くしても、
+     *   自分が最も長く粘れる手数
      */
     const distanceMemo =
         Array.from(
@@ -774,7 +780,28 @@ function createExactSolver(
             packed >>> 2
         ) - 1;
     }
-
+        /*
+     * 勝敗が確定した局面について、
+     * 終局までの最適距離を求める。
+     *
+     * WIN:
+     *   child が LOSE になる手のうち、
+     *   最も短く勝てる手。
+     *
+     * LOSE:
+     *   child が WIN になる手のうち、
+     *   最も長く粘れる手。
+     *
+     * したがって必敗局面でも、
+     *
+     *   distance
+     *
+     * と
+     *
+     *   bestMove
+     *
+     * を取得できる。
+     */
     function getDistance(
         letterId,
         usedMask,
@@ -817,7 +844,9 @@ function createExactSolver(
             legalMask &
             ~usedMask;
 
-        /* 手がない局面は、その時点で終局。 */
+        /*
+         * 手がない局面は、その時点で終局。
+         */
         if (availableMask === 0n) {
             distanceMemo[letterId][nState].set(
                 usedMask,
@@ -835,7 +864,8 @@ function createExactSolver(
         const moves =
             wordsByFirstLetterId[letterId] ??
             [];
-                    for (const move of moves) {
+
+        for (const move of moves) {
             if (
                 (availableMask & move.bit) ===
                 0n
@@ -866,6 +896,10 @@ function createExactSolver(
             let childResult;
             let childDistance = 0;
 
+            /*
+             * 次局面に合法手がない場合、
+             * 次の手番側が即負け。
+             */
             if (childLegalMask === 0n) {
                 childResult = RESULT.LOSE;
             } else {
@@ -897,7 +931,8 @@ function createExactSolver(
 
             if (result === RESULT.WIN) {
                 /*
-                 * 勝勢なら、相手を必敗にできる手のうち
+                 * 勝勢なら、
+                 * 相手を必敗にできる手のうち
                  * 最短で勝てるものを選ぶ。
                  */
                 if (
@@ -909,7 +944,8 @@ function createExactSolver(
                 }
             } else if (result === RESULT.LOSE) {
                 /*
-                 * 敗勢なら、相手の必勝を前提として
+                 * 敗勢なら、
+                 * 相手の必勝を前提として
                  * 最も長く粘れる手を選ぶ。
                  */
                 if (
@@ -937,6 +973,16 @@ function createExactSolver(
         return bestDistance;
     }
 
+    /*
+     * 勝敗と最適距離が確定している局面から、
+     * 実際の最善手を取得する。
+     *
+     * WIN:
+     *   最短勝利手
+     *
+     * LOSE:
+     *   最長抵抗手
+     */
     function findBestMove(
         letterId,
         usedMask,
@@ -1045,10 +1091,17 @@ function createExactSolver(
             const totalDistance =
                 1 + childDistance;
 
+            /*
+             * 「最適距離」と一致する手だけを候補にする。
+             */
             if (totalDistance !== optimalDistance) {
                 continue;
             }
 
+            /*
+             * 勝勢局面なら、
+             * 相手を LOSE にする必要がある。
+             */
             if (
                 result === RESULT.WIN &&
                 childResult !== RESULT.LOSE
@@ -1056,6 +1109,13 @@ function createExactSolver(
                 continue;
             }
 
+            /*
+             * 必敗局面なら、
+             * 相手の WIN は避けられない。
+             *
+             * その中で distance が最大のものを
+             * getDistance() が選んでいる。
+             */
             if (
                 result === RESULT.LOSE &&
                 childResult !== RESULT.WIN
@@ -1070,6 +1130,15 @@ function createExactSolver(
         return selectedMove;
     }
 
+    /*
+     * 最善進行を復元する。
+     *
+     * 必勝局面:
+     *   最短勝利ライン
+     *
+     * 必敗局面:
+     *   最長抵抗ライン
+     */
     function buildPrincipalVariation(
         letterId,
         usedMask,
@@ -1282,14 +1351,12 @@ function createExactSolver(
             );
 
         /*
-         * 勝敗が確定した後は、同じ締切を使い続けない。
+         * 勝敗が確定した後は、
+         * 勝敗探索と距離探索を分離する。
          *
-         * 勝敗探索で時間を使い切ってしまうと、
-         * 「最短勝利手」や「最長抵抗手」を求める
-         * 距離探索に入った瞬間にタイムアウトしてしまう。
-         *
-         * そこで、勝敗が確定している場合は、
-         * 追加で deadlineMilliseconds / 2 を距離探索に与える。
+         * 勝敗探索で deadline 近くまで使った場合でも、
+         * 「最短勝利手」または
+         * 「最長抵抗手」を求めるための時間を確保する。
          */
         if (result !== RESULT.UNKNOWN) {
             deadline =
@@ -1390,8 +1457,7 @@ function createExactSolver(
                 getStatistics()
         };
     }
-
-    function buildProof(
+        function buildProof(
         letter,
         letterId,
         usedMask,
@@ -1438,7 +1504,18 @@ function createExactSolver(
                     letter,
 
                 reason:
-                    `「${letter}」からのすべての安全手が、相手の必勝状態へ移ります。`
+                    `「${letter}」からのすべての安全手が、相手の必勝状態へ移ります。`,
+
+                /*
+                 * 必敗局面でも bestMove は存在する。
+                 *
+                 * これは「勝てる手」ではなく、
+                 * 「最も長く粘れる抵抗手」。
+                 */
+                bestResistanceMove:
+                    toPublicMove(
+                        bestMove
+                    )
             };
         }
 
@@ -1763,7 +1840,8 @@ function createExactSolver(
             );
 
         /*
-         * 勝敗が確定したら、距離探索用の追加時間を確保する。
+         * 勝敗が確定したら、
+         * 距離探索用の追加時間を確保する。
          *
          * 敗勢の場合もここで距離を求めることで、
          * 「どの手を選んでも負けるが、その中で最も長く
@@ -1929,6 +2007,9 @@ function createExactSolver(
             table.fill(-1);
         }
 
+        /*
+         * 距離解析のメモリも必ず消す。
+         */
         for (const byLetter of distanceMemo) {
             byLetter[0].clear();
             byLetter[1].clear();
@@ -2025,7 +2106,6 @@ function buildSearchWords(
         ...representatives.values()
     ];
 }
-
 function buildLetterIndex(words) {
     const letterToId =
         new Map();
@@ -2500,7 +2580,6 @@ function powerOfTwo(
 
     return result;
 }
-
 module.exports = {
     createExactSolver,
     RESULT,
