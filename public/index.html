@@ -1,0 +1,1213 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <meta
+        name="description"
+        content="国名・首都名を使ったCPU対戦・オンライン対戦対応のしりとりゲーム"
+    >
+
+    <title>国名・首都名しりとり</title>
+
+    <link
+        rel="stylesheet"
+        href="/style.css"
+    >
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- ヘッダー -->
+        <header class="site-header">
+            <div class="header-content">
+                <h1 class="site-title">
+                    国名・首都名しりとり
+                </h1>
+
+                <p class="site-description">
+                    国名や首都名を使って対戦するしりとりゲーム
+                </p>
+
+                <div
+                    id="connectionStatus"
+                    class="connection-status connecting"
+                    aria-live="polite"
+                >
+                    サーバーに接続しています
+                </div>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- ==================================================
+                 画面1：モード選択
+            =================================================== -->
+            <section
+                id="homeScreen"
+                class="screen active"
+                aria-labelledby="homeTitle"
+            >
+                <div class="panel hero-panel">
+                    <h2 id="homeTitle">
+                        対戦モードを選択
+                    </h2>
+
+                    <p class="section-description">
+                        CPUと練習するか、オンラインでほかのプレイヤーと対戦できます。
+                    </p>
+
+                    <div class="mode-selection">
+                        <button
+                            id="selectCpuModeButton"
+                            class="mode-card cpu-mode-card"
+                            type="button"
+                        >
+                            <span
+                                class="mode-icon"
+                                aria-hidden="true"
+                            >
+                                CPU
+                            </span>
+
+                            <span class="mode-title">
+                                CPU対戦
+                            </span>
+
+                            <span class="mode-description">
+                                3段階の強さからCPUを選んで対戦します
+                            </span>
+                        </button>
+
+                        <button
+                            id="selectOnlineModeButton"
+                            class="mode-card online-mode-card"
+                            type="button"
+                        >
+                            <span
+                                class="mode-icon"
+                                aria-hidden="true"
+                            >
+                                ONLINE
+                            </span>
+
+                            <span class="mode-title">
+                                オンライン対戦
+                            </span>
+
+                            <span class="mode-description">
+                                同じ設定の相手とランダムマッチングします
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="rules-summary">
+                        <h3>基本ルール</h3>
+
+                        <ul>
+                            <li>
+                                2人で交互に単語リストにある単語を1つずつ言います。
+                            </li>
+
+                            <li>
+                                通常の単語は2回目に言うと即負けになります。
+                            </li>
+
+                            <li>
+                                国名と首都名が同じ単語を2回使える設定では、その単語の3回目で即負けになります。
+                            </li>
+
+                            <li>
+                                初心者ガイドでは、言うと即負けになる単語を赤色で表示します。
+                            </li>
+
+                            <li>
+                                オンライン対戦では、1手の制限時間は20秒です。
+                            </li>
+
+                            <li>
+                                対局終了後に先手必勝・後手必勝と最善手を解析できます。
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ==================================================
+                 画面2：ゲーム設定
+            =================================================== -->
+            <section
+                id="settingsScreen"
+                class="screen"
+                aria-labelledby="settingsTitle"
+                hidden
+            >
+                <div class="panel settings-panel">
+                    <div class="section-header">
+                        <button
+                            id="backToHomeButton"
+                            class="text-button back-button"
+                            type="button"
+                        >
+                            ← モード選択へ戻る
+                        </button>
+
+                        <h2 id="settingsTitle">
+                            対戦設定
+                        </h2>
+
+                        <p
+                            id="selectedModeLabel"
+                            class="selected-mode-label"
+                        >
+                            CPU対戦
+                        </p>
+                    </div>
+
+                    <form id="settingsForm">
+                        <!-- 1．単語リスト -->
+                        <fieldset class="setting-group">
+                            <legend>
+                                1．単語リスト
+                            </legend>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="wordList"
+                                    value="countries"
+                                    checked
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        国名
+                                    </span>
+
+                                    <span class="option-description">
+                                        国名だけを使用します
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="wordList"
+                                    value="capitals"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        首都名
+                                    </span>
+
+                                    <span class="option-description">
+                                        首都名だけを使用します
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="wordList"
+                                    value="both"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        国名と首都名
+                                    </span>
+
+                                    <span class="option-description">
+                                        国名と首都名の両方を使用します
+                                    </span>
+                                </span>
+                            </label>
+                        </fieldset>
+
+                        <!-- 2．濁点・半濁点 -->
+                        <fieldset class="setting-group">
+                            <legend>
+                                2．濁点・半濁点の取り外し
+                            </legend>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="removeMarks"
+                                    value="false"
+                                    checked
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        取り外しなし
+                                    </span>
+
+                                    <span class="option-description">
+                                        「カ」と「ガ」、「ハ」と「バ・パ」を別の文字として扱います
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="removeMarks"
+                                    value="true"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        取り外しあり
+                                    </span>
+
+                                    <span class="option-description">
+                                        「ガ」を「カ」、「バ・パ」を「ハ」として扱います
+                                    </span>
+                                </span>
+                            </label>
+                        </fieldset>
+
+                        <!-- 3．ンのルール -->
+                        <fieldset class="setting-group">
+                            <legend>
+                                3．「ン」で終わる単語
+                            </legend>
+
+                            <label class="radio-option">
+                                <input
+                                    id="nRuleLose"
+                                    type="radio"
+                                    name="nRule"
+                                    value="lose"
+                                    checked
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        「ン」で終わったら即負け
+                                    </span>
+
+                                    <span class="option-description">
+                                        「ン」で終わる単語を言ったプレイヤーが、その時点で負けます
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label
+                                id="nRuleOnceOption"
+                                class="radio-option"
+                            >
+                                <input
+                                    id="nRuleOnce"
+                                    type="radio"
+                                    name="nRule"
+                                    value="once"
+                                    disabled
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        対局全体で1回だけ許可
+                                    </span>
+
+                                    <span class="option-description">
+                                        2人合わせて1回目は続行し、2回目に言ったプレイヤーが負けます
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label
+                                id="nRuleUnlimitedOption"
+                                class="radio-option"
+                            >
+                                <input
+                                    id="nRuleUnlimited"
+                                    type="radio"
+                                    name="nRule"
+                                    value="unlimited"
+                                    disabled
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        何回でも使用可能
+                                    </span>
+
+                                    <span class="option-description">
+                                        特殊しりとりルールのときのみ選択できます
+                                    </span>
+                                </span>
+                            </label>
+
+                            <p
+                                id="nRuleNotice"
+                                class="setting-notice"
+                            >
+                                「1回だけ許可」は首都名を含むモード、
+                                「何回でも使用可能」は特殊ルールで選択できます。
+                            </p>
+                        </fieldset>
+
+                        <!-- 4．しりとりルール -->
+                        <fieldset class="setting-group">
+                            <legend>
+                                4．しりとりルール
+                            </legend>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="rule"
+                                    value="normal"
+                                    checked
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        通常しりとりルール
+                                    </span>
+
+                                    <span class="option-description">
+                                        単語の最後の文字から次の単語を続けます
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="rule"
+                                    value="special"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        特殊しりとりルール
+                                    </span>
+
+                                    <span class="option-description">
+                                        最後の文字で続けられない場合、続けられる文字まで単語内を戻ります
+                                    </span>
+                                </span>
+                            </label>
+
+                            <div class="rule-example">
+                                <strong>
+                                    特殊ルールの例
+                                </strong>
+
+                                <p>
+                                    「フィリピン」の場合、「ン」「ピ」で続けられなければ、
+                                    「リ」まで戻って「リビア」などへ続けます。
+                                </p>
+                            </div>
+                        </fieldset>
+
+                        <!-- 5．同名単語 -->
+                        <fieldset
+                            id="duplicateRuleGroup"
+                            class="setting-group"
+                            hidden
+                        >
+                            <legend>
+                                5．国名と首都名が同じ単語
+                            </legend>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="duplicateRule"
+                                    value="once"
+                                    checked
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        同じ単語は全体で1回まで安全
+                                    </span>
+
+                                    <span class="option-description">
+                                        1回目は使用でき、同じ単語を2回目に言うと即負けになります
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="duplicateRule"
+                                    value="separate"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        国名と首都名として2回まで安全
+                                    </span>
+
+                                    <span class="option-description">
+                                        国名と首都名の両方にある単語は2回まで使用でき、3回目で即負けになります
+                                    </span>
+                                </span>
+                            </label>
+                        </fieldset>
+
+                        <!-- 6．CPU -->
+                        <fieldset
+                            id="cpuSettingsGroup"
+                            class="setting-group"
+                        >
+                            <legend>
+                                6．CPUの強さ
+                            </legend>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="cpuLevel"
+                                    value="easy"
+                                    checked
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        弱いCPU
+                                    </span>
+
+                                    <span class="level-badge easy">
+                                        初心者向け
+                                    </span>
+
+                                    <span class="option-description">
+                                        使用できる単語からランダムに選びます
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="cpuLevel"
+                                    value="normal"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        強いCPU
+                                    </span>
+
+                                    <span class="level-badge normal">
+                                        中級者向け
+                                    </span>
+
+                                    <span class="option-description">
+                                        相手が続けにくい単語を優先して選びます
+                                    </span>
+                                </span>
+                            </label>
+
+                            <label class="radio-option">
+                                <input
+                                    type="radio"
+                                    name="cpuLevel"
+                                    value="hard"
+                                >
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        最強CPU
+                                    </span>
+
+                                    <span class="level-badge hard">
+                                        上級者向け
+                                    </span>
+
+                                    <span class="option-description">
+                                        必勝解析を使用して最善手を選びます
+                                    </span>
+                                </span>
+                            </label>
+                        </fieldset>
+
+                        <!-- 7．初心者ガイド -->
+                        <fieldset class="setting-group">
+                            <legend>
+                                7．初心者ガイド
+                            </legend>
+
+                            <label class="switch-option">
+                                <input
+                                    id="guideEnabled"
+                                    type="checkbox"
+                                    name="guideEnabled"
+                                    value="true"
+                                >
+
+                                <span
+                                    class="switch-control"
+                                    aria-hidden="true"
+                                ></span>
+
+                                <span class="option-content">
+                                    <span class="option-title">
+                                        使用可能な単語を表示する
+                                    </span>
+
+                                    <span class="option-description">
+                                        使用候補を表示し、言うと即負けになる単語は赤色で警告します
+                                    </span>
+                                </span>
+                            </label>
+                        </fieldset>
+
+                        <div
+                            id="settingsError"
+                            class="error-message"
+                            role="alert"
+                            hidden
+                        ></div>
+
+                        <div class="form-actions">
+                            <button
+                                id="startGameButton"
+                                class="primary-button"
+                                type="submit"
+                            >
+                                この設定で開始
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- ==================================================
+                 画面3：マッチング
+            =================================================== -->
+            <section
+                id="matchingScreen"
+                class="screen"
+                aria-labelledby="matchingTitle"
+                hidden
+            >
+                <div class="panel centered-panel">
+                    <div
+                        class="matching-animation"
+                        aria-hidden="true"
+                    >
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+
+                    <h2 id="matchingTitle">
+                        対戦相手を探しています
+                    </h2>
+
+                    <p class="section-description">
+                        同じ設定を選んでいるプレイヤーとマッチングします。
+                    </p>
+
+                    <p
+                        id="matchingStatus"
+                        class="status-message"
+                        aria-live="polite"
+                    >
+                        マッチング中...
+                    </p>
+
+                    <button
+                        id="cancelMatchingButton"
+                        class="secondary-button"
+                        type="button"
+                    >
+                        マッチングをキャンセル
+                    </button>
+                </div>
+            </section>
+
+            <!-- ==================================================
+                 画面4：カウントダウン
+            =================================================== -->
+            <section
+                id="countdownScreen"
+                class="screen"
+                aria-labelledby="countdownTitle"
+                hidden
+            >
+                <div class="panel centered-panel countdown-panel">
+                    <h2 id="countdownTitle">
+                        対戦を開始します
+                    </h2>
+
+                    <p
+                        id="countdownTurnMessage"
+                        class="status-message"
+                    >
+                        先手を決めています
+                    </p>
+
+                    <div
+                        id="countdownNumber"
+                        class="countdown-number"
+                        aria-live="assertive"
+                    >
+                        3
+                    </div>
+                </div>
+            </section>
+
+            <!-- ==================================================
+                 画面5：対局
+            =================================================== -->
+            <section
+                id="gameScreen"
+                class="screen"
+                aria-labelledby="gameTitle"
+                hidden
+            >
+                <div class="game-layout">
+                    <div class="game-main-column">
+                        <div class="panel game-panel">
+                            <div class="game-header">
+                                <div>
+                                    <h2 id="gameTitle">
+                                        対局
+                                    </h2>
+
+                                    <p
+                                        id="gameModeLabel"
+                                        class="game-mode-label"
+                                    >
+                                        CPU対戦
+                                    </p>
+                                </div>
+
+                                <div
+                                    id="timerArea"
+                                    class="timer-area"
+                                    hidden
+                                >
+                                    <span class="timer-label">
+                                        残り時間
+                                    </span>
+
+                                    <strong
+                                        id="timerValue"
+                                        class="timer-value"
+                                    >
+                                        20
+                                    </strong>
+
+                                    <span class="timer-unit">
+                                        秒
+                                    </span>
+                                </div>
+                            </div>
+
+                            <div
+                                id="turnDisplay"
+                                class="turn-display"
+                                aria-live="polite"
+                            >
+                                あなたの番です
+                            </div>
+
+                            <div class="letter-display-area">
+                                <span class="letter-label">
+                                    次の文字
+                                </span>
+
+                                <strong
+                                    id="currentLetter"
+                                    class="current-letter"
+                                >
+                                    ？
+                                </strong>
+
+                                <p
+                                    id="letterInstruction"
+                                    class="letter-instruction"
+                                >
+                                    開始文字を決定しています
+                                </p>
+                            </div>
+
+                            <form
+                                id="wordForm"
+                                class="word-entry-form"
+                            >
+                                <label
+                                    for="wordInput"
+                                    class="input-label"
+                                >
+                                    単語を入力
+                                </label>
+
+                                <div class="word-input-row">
+                                    <input
+                                        id="wordInput"
+                                        class="word-input"
+                                        type="text"
+                                        inputmode="text"
+                                        autocomplete="off"
+                                        maxlength="50"
+                                        placeholder="例：カナダ"
+                                        required
+                                    >
+
+                                    <button
+                                        id="submitWordButton"
+                                        class="primary-button word-submit-button"
+                                        type="submit"
+                                    >
+                                        決定
+                                    </button>
+                                </div>
+                            </form>
+
+                            <div
+                                id="moveMessage"
+                                class="move-message"
+                                role="status"
+                                aria-live="polite"
+                                hidden
+                            ></div>
+
+                            <div
+                                id="cpuThinking"
+                                class="cpu-thinking"
+                                aria-live="polite"
+                                hidden
+                            >
+                                <span
+                                    class="small-spinner"
+                                    aria-hidden="true"
+                                ></span>
+
+                                <span>
+                                    CPUが単語を考えています
+                                </span>
+                            </div>
+                        </div>
+
+                        <!-- 初心者ガイド -->
+                        <div
+                            id="guidePanel"
+                            class="panel guide-panel"
+                            hidden
+                        >
+                            <div class="panel-heading-row">
+                                <div>
+                                    <h3>
+                                        初心者ガイド
+                                    </h3>
+
+                                    <p>
+                                        現在言える単語です。赤色の単語を言うと即負けになります。
+                                    </p>
+                                </div>
+
+                                <span
+                                    id="availableWordCount"
+                                    class="count-badge"
+                                >
+                                    0語
+                                </span>
+                            </div>
+
+                            <div
+                                id="guideLoading"
+                                class="loading-message"
+                                hidden
+                            >
+                                候補を読み込んでいます
+                            </div>
+
+                            <div
+                                id="availableWordsList"
+                                class="available-words-list"
+                            ></div>
+
+                            <p
+                                id="noAvailableWordsMessage"
+                                class="empty-message"
+                                hidden
+                            >
+                                言える単語がありません。
+                            </p>
+                        </div>
+                    </div>
+
+                    <!-- 棋譜 -->
+                    <aside class="panel history-panel">
+                        <div class="panel-heading-row">
+                            <h3>
+                                棋譜
+                            </h3>
+
+                            <span
+                                id="historyCount"
+                                class="count-badge"
+                            >
+                                0手
+                            </span>
+                        </div>
+
+                        <ol
+                            id="historyList"
+                            class="history-list"
+                        ></ol>
+
+                        <p
+                            id="emptyHistoryMessage"
+                            class="empty-message"
+                        >
+                            まだ単語は使用されていません。
+                        </p>
+                    </aside>
+                </div>
+            </section>
+
+            <!-- ==================================================
+                 画面6：結果
+            =================================================== -->
+            <section
+                id="resultScreen"
+                class="screen"
+                aria-labelledby="resultTitle"
+                hidden
+            >
+                <div class="result-layout">
+                    <div class="panel result-panel">
+                        <div
+                            id="resultIcon"
+                            class="result-icon"
+                            aria-hidden="true"
+                        >
+                            WIN
+                        </div>
+
+                        <h2 id="resultTitle">
+                            あなたの勝ち
+                        </h2>
+
+                        <p
+                            id="resultReason"
+                            class="result-reason"
+                        >
+                            対局が終了しました。
+                        </p>
+
+                        <div class="result-actions">
+                            <button
+                                id="analyzeGameButton"
+                                class="primary-button"
+                                type="button"
+                            >
+                                この対局を必勝解析
+                            </button>
+
+                            <button
+                                id="playAgainButton"
+                                class="secondary-button"
+                                type="button"
+                            >
+                                もう一度対戦
+                            </button>
+
+                            <button
+                                id="returnHomeButton"
+                                class="text-button"
+                                type="button"
+                            >
+                                モード選択へ戻る
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="panel result-history-panel">
+                        <div class="panel-heading-row">
+                            <h3>
+                                対局の棋譜
+                            </h3>
+
+                            <span
+                                id="resultHistoryCount"
+                                class="count-badge"
+                            >
+                                0手
+                            </span>
+                        </div>
+
+                        <ol
+                            id="resultHistoryList"
+                            class="history-list result-history-list"
+                        ></ol>
+
+                        <p
+                            id="emptyResultHistoryMessage"
+                            class="empty-message"
+                            hidden
+                        >
+                            棋譜はありません。
+                        </p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- ==================================================
+                 画面7：解析
+            =================================================== -->
+            <section
+                id="analysisScreen"
+                class="screen"
+                aria-labelledby="analysisTitle"
+                hidden
+            >
+                <div class="panel analysis-panel">
+                    <div class="section-header">
+                        <h2 id="analysisTitle">
+                            対局後の必勝解析
+                        </h2>
+
+                        <p class="section-description">
+                            初期局面と実際の棋譜を解析します。
+                        </p>
+                    </div>
+
+                    <div
+                        id="analysisLoading"
+                        class="analysis-loading"
+                    >
+                        <div
+                            class="large-spinner"
+                            aria-hidden="true"
+                        ></div>
+
+                        <p>
+                            必勝手を解析しています
+                        </p>
+
+                        <p class="loading-note">
+                            単語数や局面によっては計算量が大きくなる場合があります。
+                        </p>
+                    </div>
+
+                    <div
+                        id="analysisError"
+                        class="error-message"
+                        role="alert"
+                        hidden
+                    ></div>
+
+                    <div
+                        id="analysisContent"
+                        hidden
+                    >
+                        <div class="analysis-summary-grid">
+                            <article class="analysis-card verdict-card">
+                                <span class="analysis-card-label">
+                                    初期局面
+                                </span>
+
+                                <strong
+                                    id="analysisVerdict"
+                                    class="analysis-verdict"
+                                >
+                                    判定中
+                                </strong>
+                            </article>
+
+                            <article class="analysis-card">
+                                <span class="analysis-card-label">
+                                    開始文字
+                                </span>
+
+                                <strong
+                                    id="analysisStartLetter"
+                                    class="analysis-value"
+                                >
+                                    ？
+                                </strong>
+                            </article>
+
+                            <article class="analysis-card">
+                                <span class="analysis-card-label">
+                                    開始時の最善手
+                                </span>
+
+                                <strong
+                                    id="analysisBestMove"
+                                    class="analysis-value"
+                                >
+                                    解析中
+                                </strong>
+                            </article>
+
+                            <article class="analysis-card">
+                                <span class="analysis-card-label">
+                                    最善進行の予想手数
+                                </span>
+
+                                <strong
+                                    id="analysisDistance"
+                                    class="analysis-value"
+                                >
+                                    －
+                                </strong>
+                            </article>
+                        </div>
+
+                        <div class="analysis-section">
+                            <h3>
+                                解析結果
+                            </h3>
+
+                            <p
+                                id="analysisSummary"
+                                class="analysis-summary-text"
+                            ></p>
+                        </div>
+
+                        <div
+                            id="turningPointSection"
+                            class="analysis-section"
+                            hidden
+                        >
+                            <h3>
+                                勝負の分岐点
+                            </h3>
+
+                            <div class="turning-point-card">
+                                <p>
+                                    <strong
+                                        id="turningPointTurn"
+                                    ></strong>
+                                </p>
+
+                                <p>
+                                    実際の手：
+                                    <strong
+                                        id="turningPointActual"
+                                    ></strong>
+                                </p>
+
+                                <p>
+                                    最善手：
+                                    <strong
+                                        id="turningPointBest"
+                                    ></strong>
+                                </p>
+
+                                <p
+                                    id="turningPointEvaluation"
+                                ></p>
+                            </div>
+                        </div>
+
+                        <div class="analysis-section">
+                            <div class="panel-heading-row">
+                                <h3>
+                                    各手の解析
+                                </h3>
+
+                                <span
+                                    id="analysisMoveCount"
+                                    class="count-badge"
+                                >
+                                    0手
+                                </span>
+                            </div>
+
+                            <div
+                                id="moveAnalysisList"
+                                class="move-analysis-list"
+                            ></div>
+
+                            <p
+                                id="emptyMoveAnalysisMessage"
+                                class="empty-message"
+                                hidden
+                            >
+                                解析する手がありません。
+                            </p>
+                        </div>
+
+                        <div class="analysis-actions">
+                            <button
+                                id="backToResultButton"
+                                class="secondary-button"
+                                type="button"
+                            >
+                                対局結果へ戻る
+                            </button>
+
+                            <button
+                                id="analysisPlayAgainButton"
+                                class="primary-button"
+                                type="button"
+                            >
+                                もう一度対戦
+                            </button>
+
+                            <button
+                                id="analysisHomeButton"
+                                class="text-button"
+                                type="button"
+                            >
+                                モード選択へ戻る
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <p>
+                国名・首都名しりとり
+            </p>
+        </footer>
+    </div>
+
+    <!-- 共通モーダル -->
+    <div
+        id="messageModal"
+        class="modal-overlay"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modalTitle"
+        hidden
+    >
+        <div class="modal-content">
+            <h2 id="modalTitle">
+                お知らせ
+            </h2>
+
+            <p id="modalMessage"></p>
+
+            <button
+                id="closeModalButton"
+                class="primary-button"
+                type="button"
+            >
+                閉じる
+            </button>
+        </div>
+    </div>
+
+    <!-- Socket.IOクライアント -->
+    <script src="/socket.io/socket.io.js"></script>
+
+    <!-- ゲーム処理 -->
+    <script src="/client.js"></script>
+</body>
+</html>
