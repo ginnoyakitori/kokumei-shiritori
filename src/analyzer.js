@@ -84,9 +84,9 @@ const EXACT_ANALYSIS = {
     },
 
     /*
-     * 解析開始からこの時間を過ぎたら、
-     * 以降の手は完全解析を試さず限定解析にする。
-     * (analysis-manager のタイムアウト45秒に収めるため)
+     * 互換用に残している対局全体の予算。
+     * exact 解析の打ち切り判定には使用しない。
+     * 実際の局面ごとの上限は exact-solver 側で管理する。
      */
     budgetMilliseconds: 25000
 };
@@ -398,7 +398,7 @@ function getTurnName(index) {
     return index % 2 === 0
         ? "先手"
         : "後手";
-}
+        }
 
 function getOpponentName(player) {
     return player === "先手"
@@ -770,6 +770,8 @@ function analyzeStateCached(
 
     return result;
 }
+
+
 /* =========================================================
    完全解析(exact-solver)による局面評価
 ========================================================= */
@@ -826,12 +828,12 @@ function analyzeStateExact(state, context) {
         return null;
     }
 
-    if (
-        Date.now() - context.startedAt >
-        context.budgetMilliseconds
-    ) {
-        return null;
-    }
+    /*
+     * 対局全体の時間制限では exact 解析を途中停止しない。
+     * exact-solver 自身が局面ごとの deadline / maxStates を管理する。
+     * これにより「初期局面は完全解析、途中から限定解析」という
+     * 不整合を防ぎ、各局面を同じ exact solver で評価できる。
+     */
 
     let analysis;
 
@@ -904,6 +906,7 @@ function analyzeStateAuto(
         )
     );
 }
+
 
 /* =========================================================
    初期局面
@@ -1212,7 +1215,7 @@ function createMoveComment(move) {
     return (
         "最善手とは異なる手が選ばれました。"
     );
-}
+    }
 
 /* =========================================================
    棋譜の各手を解析
@@ -1416,21 +1419,11 @@ function analyzeMoves(
          *   解析が挙げた最善手と同じ単語かどうか。
          */
         const wasBestMove =
-            bothExact
-                ? (
-                    moverWasWinning
-                        ? moverStillWinning
-                        : isSameWord(
-                            recorded.word,
-                            before.bestMove,
-                            settings
-                        )
-                )
-                : isSameWord(
-                    recorded.word,
-                    before.bestMove,
-                    settings
-                );
+    isSameWord(
+        recorded.word,
+        before.bestMove,
+        settings
+    );
 
         const evaluationChanged =
             beforeEval.winningPlayer !==
@@ -1514,6 +1507,7 @@ function analyzeMoves(
         moveOptions
     };
 }
+
 /* =========================================================
    実際の勝者
 ========================================================= */
@@ -1889,7 +1883,6 @@ function analyze(
         }
     };
 }
-
 /* =========================================================
    特定局面の解析
 ========================================================= */
