@@ -68,8 +68,18 @@ const ANALYSIS_OPTIONS = {
    完全解析(exact-solver)の設定
 
    1回の対局解析の中で、同じソルバーを
-   初期局面と各手の評価で共有する。
-   maxStates は対局解析全体での累計の上限。
+   初期局面と各手の評価で共有する(探索済みの局面は再利用される)。
+
+   maxStates / deadlineMilliseconds:
+     「1局面あたり」の上限。局面ごとに数え直す。
+
+   budgetMilliseconds:
+     対局解析全体で完全解析に使える合計時間。
+     ワーカーのタイムアウト(analysis-manager.js の 45 秒)より
+     十分短くしておく。使い切ったら、残りの局面は限定解析にする。
+
+   minCallMilliseconds:
+     残り時間がこれ未満なら、完全解析は始めずに限定解析へ切り替える。
 ========================================================= */
 
 const EXACT_ANALYSIS = {
@@ -83,12 +93,9 @@ const EXACT_ANALYSIS = {
         deadlineMilliseconds: 8000
     },
 
-    /*
-     * 互換用に残している対局全体の予算。
-     * exact 解析の打ち切り判定には使用しない。
-     * 実際の局面ごとの上限は exact-solver 側で管理する。
-     */
-    budgetMilliseconds: 25000
+    budgetMilliseconds: 30000,
+
+    minCallMilliseconds: 200
 };
 
 /* =========================================================
@@ -785,10 +792,7 @@ function createExactAnalysisSolver(settings) {
         return null;
     }
 
-    const config =
-        settings.wordList === "countries"
-            ? EXACT_ANALYSIS.countries
-            : EXACT_ANALYSIS.other;
+    const config = getExactConfig(settings);
 
     try {
         return createExactSolver(
@@ -808,6 +812,47 @@ function createExactAnalysisSolver(settings) {
     }
 }
 
+function getExactConfig(settings) {
+    return settings.wordList === "countries"
+        ? EXACT_ANALYSIS.countries
+        : EXACT_ANALYSIS.other;
+}
+
+/**
+ * 次の完全解析1回に許す上限を返す。
+ *
+ * 制限時間 = min(1局面あたりの上限, 対局全体の残り時間)
+ * 残り時間が足りなければ null (完全解析をやめて限定解析にする)。
+ */
+function getExactCallLimits(context) {
+    if (!context?.solver) {
+        return null;
+    }
+
+    const remaining =
+        context.deadlineAt - Date.now();
+
+    if (remaining < EXACT_ANALYSIS.minCallMilliseconds) {
+        context.budgetExhausted = true;
+
+        return null;
+    }
+
+    return {
+        maxStates:
+            context.config.maxStates,
+
+        deadlineMilliseconds:
+            Math.max(
+                1,
+                Math.min(
+                    context.config.deadlineMilliseconds,
+                    Math.floor(remaining)
+                )
+            )
+    };
+}
+
 /**
  * 完全解析で局面を評価する。
  *
@@ -824,16 +869,11 @@ function createExactAnalysisSolver(settings) {
  *   負けるまで最も長く粘れる手を bestMove / distance にする。
  */
 function analyzeStateExact(state, context) {
-    if (!context?.solver) {
+    const limits = getExactCallLimits(context);
+
+    if (!limits) {
         return null;
     }
-
-    /*
-     * 対局全体の時間制限では exact 解析を途中停止しない。
-     * exact-solver 自身が局面ごとの deadline / maxStates を管理する。
-     * これにより「初期局面は完全解析、途中から限定解析」という
-     * 不整合を防ぎ、各局面を同じ exact solver で評価できる。
-     */
 
     let analysis;
 
@@ -841,7 +881,9 @@ function analyzeStateExact(state, context) {
         analysis = context.solver.analyzePosition({
             requiredLetter: state.currentLetter,
             usedWords: state.usedWords ?? [],
-            nEndCount: Number(state.nEndCount ?? 0)
+            nEndCount: Number(state.nEndCount ?? 0),
+            maxStates: limits.maxStates,
+            deadlineMilliseconds: limits.deadlineMilliseconds
         });
     } catch (error) {
         console.error(
@@ -946,18 +988,26 @@ function analyzeInitialPosition(
 
         let exactResult = null;
 
-        try {
-            exactResult =
-                context.solver.analyzeStart(
-                    startLetter,
-                    [],
-                    0
+        const limits =
+            getExactCallLimits(context);
+
+        if (limits) {
+            try {
+                exactResult =
+                    context.solver.analyzePosition({
+                        requiredLetter: startLetter,
+                        usedWords: [],
+                        nEndCount: 0,
+                        maxStates: limits.maxStates,
+                        deadlineMilliseconds:
+                            limits.deadlineMilliseconds
+                    });
+            } catch (error) {
+                console.error(
+                    "[analyzer] 初期局面のexact解析に失敗しました。",
+                    error
                 );
-        } catch (error) {
-            console.error(
-                "[analyzer] 初期局面のexact解析に失敗しました。",
-                error
-            );
+            }
         }
 
         if (exactResult?.exact) {
@@ -987,7 +1037,7 @@ function analyzeInitialPosition(
 
                 analysisOptions: {
                     method:
-                        "exact-retrograde",
+                        "exact-search",
 
                     maxStates:
                         exactResult
@@ -1411,19 +1461,24 @@ function analyzeMoves(
             afterEval.winningPlayer === player;
 
         /*
-         * 完全解析どうしの場合:
-         *   勝ちの局面で勝ちを維持した手はすべて最善手。
-         *   (勝ち手が複数ある場合に、
-         *    solverが挙げた1手だけを正解とみなさない)
-         * それ以外の場合:
-         *   解析が挙げた最善手と同じ単語かどうか。
+         * 完全解析どうしで、指す前が勝ちの局面の場合:
+         *   勝ちを維持した手はすべて最善手とする。
+         *   (勝ち手が複数ある場合に、solverが挙げた1手だけを
+         *    正解とみなさない)
+         * それ以外の場合(負けの局面、限定解析を含む場合):
+         *   解析が挙げた最善手(負けなら最も粘れる手)と同じ単語かどうか。
          */
         const wasBestMove =
-    isSameWord(
-        recorded.word,
-        before.bestMove,
-        settings
-    );
+            (
+                bothExact &&
+                moverWasWinning
+            )
+                ? moverStillWinning
+                : isSameWord(
+                    recorded.word,
+                    before.bestMove,
+                    settings
+                );
 
         const evaluationChanged =
             beforeEval.winningPlayer !==
@@ -1771,8 +1826,14 @@ function analyze(
 
     const context = {
         solver: createExactAnalysisSolver(settings),
+        config: getExactConfig(settings),
         startedAt,
-        budgetMilliseconds: EXACT_ANALYSIS.budgetMilliseconds
+
+        /* 対局解析全体で完全解析を打ち切る時刻 */
+        deadlineAt:
+            startedAt + EXACT_ANALYSIS.budgetMilliseconds,
+
+        budgetExhausted: false
     };
 
     const initial =
@@ -1867,6 +1928,9 @@ function analyze(
             limited: initial.limited,
 
             exactSolverUsed: context.solver !== null,
+
+            exactBudgetExhausted:
+                context.budgetExhausted === true,
 
             exactMoveCount:
                 detail.moves.filter(
