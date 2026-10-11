@@ -264,6 +264,9 @@ const gameState = {
  *
  * pendingAvailableRequestにPromiseの解決関数を保存する。
  */
+/* サーバーへの問い合わせのタイムアウト(ミリ秒) */
+const REQUEST_TIMEOUT_MS = 10000;
+
 const availableWordRequests =
     new Map();
 
@@ -965,7 +968,14 @@ gameState.currentLetter =
         return;
     }
 
-    if (available.length === 0) {
+    /*
+     * 取得できなかった(null)場合は、勝敗を決めずに手番を進める。
+     * 入力された単語はサーバーの一覧で改めて確認される。
+     */
+    if (
+        available !== null &&
+        available.length === 0
+    ) {
         finishGame({
             winner: "cpu",
             loser: "human",
@@ -987,7 +997,12 @@ gameState.currentLetter =
 
     updateGameInterface();
 
-    if (gameState.settings.guideEnabled) {
+    if (available === null) {
+        showMoveMessage(
+            "サーバーから単語一覧を取得できませんでした。入力は続けられます。",
+            "error"
+        );
+    } else if (gameState.settings.guideEnabled) {
         renderGuideWords(available);
     }
 
@@ -1032,15 +1047,9 @@ socket.on("availableWords", data => {
     }
 
     /*
-     * requestIdのない応答は、
-     * 初心者ガイド表示として扱う。
+     * requestIdのない応答は使用しない。
+     * ガイドの表示も requestAvailableWords() の結果で行う。
      */
-    if (
-        gameState.settings?.guideEnabled &&
-        gameState.myTurn
-    ) {
-        renderGuideWords(words);
-    }
 });
 
 
@@ -1615,6 +1624,18 @@ async function handleCpuGameHumanMove(
             gameState.usedWords
         );
 
+    if (availableWords === null) {
+        showMoveMessage(
+            "サーバーから応答がありませんでした。もう一度入力してください。",
+            "error"
+        );
+
+        setInputEnabled(true);
+        elements.wordInput.focus();
+
+        return;
+    }
+
     const entry =
         findInputEntry(
             inputWord,
@@ -1635,6 +1656,13 @@ async function handleCpuGameHumanMove(
 
     const requiredLetter =
         gameState.currentLetter;
+
+    /* 通信エラー時に手を取り消すため、変更前の状態を覚えておく */
+    const rollback = {
+        historyLength: gameState.history.length,
+        usedWordsLength: gameState.usedWords.length,
+        nEndCount: gameState.nEndCount
+    };
 
     /*
      * 使用履歴へ追加する前に即負けを判定する。
@@ -1745,6 +1773,30 @@ async function handleCpuGameHumanMove(
             gameState.nEndCount
         );
 
+    /*
+     * 取得できなかった場合は、この手を取り消して入力し直してもらう。
+     * ("" は「続けられる文字がない」なので別扱い)
+     */
+    if (nextLetter === null) {
+        gameState.history.length = rollback.historyLength;
+        gameState.usedWords.length = rollback.usedWordsLength;
+        gameState.nEndCount = rollback.nEndCount;
+
+        renderHistory();
+
+        elements.wordInput.value = inputWord;
+
+        showMoveMessage(
+            "サーバーから応答がありませんでした。もう一度入力してください。",
+            "error"
+        );
+
+        setInputEnabled(true);
+        elements.wordInput.focus();
+
+        return;
+    }
+
     gameState.currentLetter =
         nextLetter;
 
@@ -1801,6 +1853,7 @@ async function handleCpuGameHumanMove(
      * 本当に単語そのものがない場合だけ0件になる。
      */
     if (
+        cpuCandidates !== null &&
         cpuCandidates.length === 0
     ) {
         finishGame({
@@ -1895,117 +1948,14 @@ function requestCpuMove() {
 /* =========================================================
    使用可能単語取得
 ========================================================= */
-/* =========================================================
-   次の文字をサーバーから取得
-========================================================= */
 
-function requestNextLetter(
-    word,
-    usedWords,
-    nEndCount
-) {
-    return new Promise(resolve => {
-        const requestId =
-            `next-letter-${Date.now()}-${Math.random()
-                .toString(36)
-                .slice(2)}`;
-
-        let finished =
-            false;
-
-        const cleanup = () => {
-            socket.off(
-                "nextLetterResult",
-                handleResult
-            );
-
-            window.clearTimeout(
-                timeoutId
-            );
-        };
-
-        const finish = nextLetter => {
-            if (finished) {
-                return;
-            }
-
-            finished = true;
-
-            cleanup();
-
-            resolve(
-                nextLetter || ""
-            );
-        };
-
-        const handleResult = data => {
-            if (
-                data?.requestId !==
-                requestId
-            ) {
-                return;
-            }
-
-            if (
-                data?.success !== true
-            ) {
-                finish("");
-                return;
-            }
-
-            finish(
-                String(
-                    data.nextLetter ?? ""
-                )
-            );
-        };
-
-        const timeoutId =
-            window.setTimeout(() => {
-                finish("");
-            }, 10000);
-
-        socket.on(
-            "nextLetterResult",
-            handleResult
-        );
-
-        socket.emit(
-            "getNextLetter",
-            {
-                requestId,
-
-                word,
-
-                usedWords:
-                    Array.isArray(
-                        usedWords
-                    )
-                        ? usedWords
-                        : [],
-
-                nEndCount:
-                    Number.isFinite(
-                        Number(
-                            nEndCount
-                        )
-                    )
-                        ? Number(
-                            nEndCount
-                        )
-                        : 0,
-
-                settings:
-                    gameState.settings
-            }
-        );
-    });
-}
-
-/* =========================================================
-   使用可能単語取得
-========================================================= */
-
+/**
+ * 使用可能な単語をサーバーから取得する。
+ *
+ * 戻り値:
+ *   配列  使用可能な単語([] は本当に1語もない)
+ *   null  取得できなかった(タイムアウト・リセット)
+ */
 function requestAvailableWords(
     currentLetter,
     usedWords
@@ -2030,8 +1980,8 @@ function requestAvailableWords(
                     requestId
                 );
 
-                resolve([]);
-            }, 10000);
+                resolve(null);
+            }, REQUEST_TIMEOUT_MS);
 
         availableWordRequests.set(
             requestId,
@@ -2086,6 +2036,11 @@ async function refreshGuide() {
         );
 
     elements.guideLoading.hidden = true;
+
+    if (words === null) {
+        clearGuide();
+        return;
+    }
 
     if (
         gameState.mode === "cpu" &&
@@ -2223,38 +2178,50 @@ function clearGuide() {
     elements.guideLoading.hidden = true;
 }
 
+/**
+ * サーバーから正式な次の文字を取得する。
+ *
+ * 戻り値:
+ *   文字列  次の文字。"" は「続けられる文字がない」(特殊ルールで着手側の勝ち)
+ *   null    取得できなかった(タイムアウト・サーバーのエラー)
+ *
+ * null と "" を区別すること。null を "" と同じに扱うと、
+ * 通信エラーで勝敗を誤判定する。
+ */
 function requestNextLetter(word, usedWords, nEndCount) {
     return new Promise(resolve => {
         const requestId =
-            `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            `next-letter-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-        const timeout = setTimeout(() => {
+        let timeoutId = null;
+
+        const finish = value => {
+            window.clearTimeout(timeoutId);
+
             socket.off(
                 "nextLetterResult",
                 handler
             );
 
-            resolve("");
-        }, 5000);
+            resolve(value);
+        };
 
         const handler = data => {
             if (data?.requestId !== requestId) {
                 return;
             }
 
-            clearTimeout(timeout);
-
-            socket.off(
-                "nextLetterResult",
-                handler
-            );
-
-            resolve(
-                data?.success
+            finish(
+                data?.success === true
                     ? String(data.nextLetter ?? "")
-                    : ""
+                    : null
             );
         };
+
+        timeoutId = window.setTimeout(
+            () => finish(null),
+            REQUEST_TIMEOUT_MS
+        );
 
         socket.on(
             "nextLetterResult",
@@ -2283,6 +2250,7 @@ function requestNextLetter(word, usedWords, nEndCount) {
         });
     });
 }
+
 /* =========================================================
    ゲーム画面更新
 ========================================================= */
@@ -2954,7 +2922,7 @@ function resetGameState() {
         request.timeoutId
     );
 
-    request.resolve([]);
+    request.resolve(null);
 }
 
 availableWordRequests.clear();

@@ -1045,9 +1045,10 @@ function getExactSolver(settings) {
  * exact-solverで現在局面を解く。
  *
  * 戻り値:
- *   null                                   解析できない(特殊ルール・上限到達・エラー)
- *   { winning: false, entry: null, ... }   手番側の負けが確定
- *   { winning: true,  entry, ... }         勝ち手が見つかった
+ *   null                                   解析できない(上限到達・エラー・特殊ルール)
+ *   { winning: true,  entry, ... }         勝ち手(最短で勝てる手)
+ *   { winning: false, entry, ... }         負けが確定。entry は最も長く粘れる手
+ *                                          (候補と対応づけられなければ null)
  */
 function findExactMove(
     state,
@@ -1068,12 +1069,12 @@ function findExactMove(
     }
 
     /*
-     * 探索回数は呼び出しをまたいで累積するため、
-     * 上限の半分を超えたらメモを作り直す。
+     * 解析済みの局面はメモとして残り、次の手の解析で再利用される。
+     * メモが多くなりすぎたら作り直す。
      */
     if (
-        solver.getStatistics().visitedStates >=
-        solver.options.maxStates * 0.5
+        solver.getStatistics().memoStates >=
+        solver.options.maxStates
     ) {
         solver.clear();
     }
@@ -1095,14 +1096,6 @@ function findExactMove(
         return null;
     }
 
-    if (analysis.winning !== true) {
-        return {
-            winning: false,
-            entry: null,
-            distance: analysis.distance
-        };
-    }
-
     const bestReading = logic.normalizeReading(
         analysis.bestMove?.reading ??
         analysis.bestMove?.name ??
@@ -1111,21 +1104,26 @@ function findExactMove(
     );
 
     /* solverの手を、現局面の候補(安全な手)のデータへ対応づける */
-    const entry = safeMoves.find(candidate => {
-        return (
-            logic.normalizeReading(
-                candidate.reading ?? candidate.name,
-                settings
-            ) === bestReading
-        );
-    }) ?? null;
+    const entry = bestReading
+        ? safeMoves.find(candidate => {
+            return (
+                logic.normalizeReading(
+                    candidate.reading ?? candidate.name,
+                    settings
+                ) === bestReading
+            );
+        }) ?? null
+        : null;
 
-    if (!entry) {
+    const winning = analysis.winning === true;
+
+    /* 勝ち手が候補に見つからないのは異常なので、解析不能として扱う */
+    if (winning && !entry) {
         return null;
     }
 
     return {
-        winning: true,
+        winning,
         entry,
         distance: analysis.distance
     };
@@ -1162,13 +1160,20 @@ function bestMove(
             settings
         );
 
+        /*
+         * 勝ちなら最短で勝つ手、
+         * 負けなら solver が求めた最も長く粘れる手。
+         */
         return createMoveResult(
             exact.entry,
             nextState.currentLetter,
             {
                 cpuLevel: "hard",
-                evaluation: "exact",
-                winning: true,
+                evaluation:
+                    exact.winning
+                        ? "exact"
+                        : "exact-lost-resist",
+                winning: exact.winning,
                 distance: exact.distance,
                 limited: false,
                 nEndCount: nextState.nEndCount,
@@ -1178,8 +1183,8 @@ function bestMove(
     }
 
     /*
-     * 2. 特殊ルール、完全解析の上限到達、または負けが確定している局面は、
-     *    限定探索で最も粘れる(または有望な)手を選ぶ。
+     * 2. 特殊ルール、完全解析の上限到達、または手を対応づけられなかった
+     *    場合は、限定探索で最も粘れる(または有望な)手を選ぶ。
      */
     analyzedNodeCount = 0;
     analyzingStates.clear();
