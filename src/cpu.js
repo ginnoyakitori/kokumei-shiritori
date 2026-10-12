@@ -26,6 +26,17 @@ const EXACT_MAX_STATES_OTHER = 300000;
 const EXACT_DEADLINE_MS = 6000;
 const MAX_EXACT_SOLVERS = 4;
 
+/*
+ * 特殊ルール:開始局面から解き切れないことが多いので、
+ * 完全解析を短く試し、解けなければ時間制限つきの探索
+ * (モンテカルロ木探索+部分的な完全解析)で手を選ぶ。
+ *
+ * 合計はワーカーのCPU用タイムアウト(10秒)より十分短くする。
+ */
+const SPECIAL_EXACT_DEADLINE_MS = 1500;
+const SPECIAL_EXACT_MAX_STATES = 3000000;
+const SPECIAL_SEARCH_MS = 4000;
+
 /* 探索キャッシュの上限件数 */
 const MAX_CACHE_ENTRIES = 20000;
 
@@ -81,6 +92,13 @@ function normalizeState(state = {}) {
     };
 }
 
+function isPastDeadline(limits) {
+    return (
+        limits.deadlineAt > 0 &&
+        Date.now() >= limits.deadlineAt
+    );
+}
+
 function normalizeLimits(options = {}) {
     const maxDepth = Number(options.maxDepth);
     const maxNodes = Number(options.maxNodes);
@@ -106,7 +124,13 @@ function normalizeLimits(options = {}) {
         limitedMoves:
             Number.isFinite(limitedMoves) && limitedMoves >= 1
                 ? Math.floor(limitedMoves)
-                : DEFAULT_LIMITED_MOVES
+                : DEFAULT_LIMITED_MOVES,
+
+        /* 探索を打ち切る時刻(ミリ秒)。指定がなければ時間では打ち切らない */
+        deadlineAt:
+            Number.isFinite(Number(options.deadlineAt))
+                ? Number(options.deadlineAt)
+                : 0
     };
 }
 
@@ -816,7 +840,8 @@ function solvePosition(
 
     if (
         depth >= limits.maxDepth ||
-        analyzedNodeCount >= limits.maxNodes
+        analyzedNodeCount >= limits.maxNodes ||
+        isPastDeadline(limits)
     ) {
         return createLimitedResult(state, settings, limits);
     }
@@ -860,7 +885,10 @@ function solvePosition(
 
     try {
         for (const entry of safeMoves) {
-            if (analyzedNodeCount >= limits.maxNodes) {
+            if (
+                analyzedNodeCount >= limits.maxNodes ||
+                isPastDeadline(limits)
+            ) {
                 hasUnknown = true;
                 break;
             }
@@ -1003,14 +1031,9 @@ function solvePosition(
 
 /**
  * 設定に応じた完全解析ソルバーを返す。
- * 通常しりとりルール以外では使えないため null を返す。
  */
 function getExactSolver(settings) {
     const ruleSettings = normalizeRuleSettings(settings);
-
-    if (ruleSettings.rule !== "normal") {
-        return null;
-    }
 
     const key = JSON.stringify(ruleSettings);
 
@@ -1031,7 +1054,10 @@ function getExactSolver(settings) {
                         ? EXACT_MAX_STATES_COUNTRIES
                         : EXACT_MAX_STATES_OTHER,
 
-                deadlineMilliseconds: EXACT_DEADLINE_MS
+                deadlineMilliseconds: EXACT_DEADLINE_MS,
+
+                /* メモリ節約のためメモの大きさを制限する */
+                maxMemoSlots: 1 << 22
             }
         );
 
@@ -1039,6 +1065,85 @@ function getExactSolver(settings) {
     }
 
     return solver;
+}
+
+function isSpecialRule(settings) {
+    return normalizeRuleSettings(settings).rule !== "normal";
+}
+
+/**
+ * 時間制限つき探索で手を選ぶ(特殊ルール用)。
+ *
+ * 戻り値: null(探索できない) または
+ *   { entry, winning(true/false/null), winRate, simulations }
+ */
+function findSearchedMove(state, settings, safeMoves) {
+    let solver;
+
+    try {
+        solver = getExactSolver(settings);
+    } catch (error) {
+        console.error("[cpu] exact-solverの作成に失敗しました。", error);
+        return null;
+    }
+
+    if (!solver || typeof solver.suggestMove !== "function") {
+        return null;
+    }
+
+    let suggestion;
+
+    try {
+        suggestion = solver.suggestMove({
+            requiredLetter: state.currentLetter,
+            usedWords: state.usedWords,
+            nEndCount: state.nEndCount,
+            timeLimitMilliseconds: SPECIAL_SEARCH_MS
+        });
+    } catch (error) {
+        console.error("[cpu] 時間制限つき探索に失敗しました。", error);
+        return null;
+    }
+
+    if (!suggestion?.found || !suggestion.bestMove) {
+        return null;
+    }
+
+    const reading = logic.normalizeReading(
+        suggestion.bestMove.reading ??
+        suggestion.bestMove.name ??
+        "",
+        settings
+    );
+
+    const entry = safeMoves.find(candidate => {
+        return (
+            logic.normalizeReading(
+                candidate.reading ?? candidate.name,
+                settings
+            ) === reading
+        );
+    }) ?? null;
+
+    if (!entry) {
+        return null;
+    }
+
+    return {
+        entry,
+
+        winning:
+            suggestion.proven === "WIN"
+                ? true
+                : (
+                    suggestion.proven === "LOSE"
+                        ? false
+                        : null
+                ),
+
+        winRate: suggestion.winRate,
+        simulations: suggestion.simulations
+    };
 }
 
 /**
@@ -1079,13 +1184,23 @@ function findExactMove(
         solver.clear();
     }
 
+    const special = isSpecialRule(settings);
+
     let analysis;
 
     try {
         analysis = solver.analyzePosition({
             requiredLetter: state.currentLetter,
             usedWords: state.usedWords,
-            nEndCount: state.nEndCount
+            nEndCount: state.nEndCount,
+
+            /* 特殊ルールは解けないことが多いので、短く試すだけにする */
+            ...(special
+                ? {
+                    maxStates: SPECIAL_EXACT_MAX_STATES,
+                    deadlineMilliseconds: SPECIAL_EXACT_DEADLINE_MS
+                }
+                : {})
         });
     } catch (error) {
         console.error("[cpu] exact-solverの解析に失敗しました。", error);
@@ -1180,6 +1295,38 @@ function bestMove(
                 immediateLoss: false
             }
         );
+    }
+
+    /*
+     * 1.5 特殊ルールは、完全解析できなかった場合に
+     *     時間制限つき探索(モンテカルロ木探索)で手を選ぶ。
+     *     手が1つしかなければ探索は不要。
+     */
+    if (isSpecialRule(settings) && safeMoves.length > 1) {
+        const searched = findSearchedMove(state, settings, safeMoves);
+
+        if (searched) {
+            const nextState = createNextState(
+                state,
+                searched.entry,
+                settings
+            );
+
+            return createMoveResult(
+                searched.entry,
+                nextState.currentLetter,
+                {
+                    cpuLevel: "hard",
+                    evaluation: "mcts",
+                    winning: searched.winning,
+                    winRate: searched.winRate,
+                    simulations: searched.simulations,
+                    limited: searched.winning === null,
+                    nEndCount: nextState.nEndCount,
+                    immediateLoss: false
+                }
+            );
+        }
     }
 
     /*

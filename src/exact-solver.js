@@ -75,6 +75,14 @@ class StateTable {
         this.count = 0;
     }
 
+    /* 上限の大きさで、かなり埋まっているか */
+    isNearlyFull() {
+        return (
+            this.bits >= this.maxBits &&
+            this.count * 2 >= this.capacity * 0.5
+        );
+    }
+
     clear() {
         this.keys1.fill(0);
         this.keys2.fill(0);
@@ -111,8 +119,12 @@ class StateTable {
             if (this.bits < this.maxBits) {
                 this.grow();
             } else {
-                /* 上限に達したらメモを捨てる(正しさには影響しない) */
-                this.clear();
+                /*
+                 * 上限に達したら、新しい局面は記録しない。
+                 * (探索中に表を空にすると、解いたばかりの局面まで
+                 *  失われるため。表を空にするのは解析の合間だけ)
+                 */
+                return;
             }
         }
 
@@ -344,7 +356,14 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
         () => []
     );
 
+    /*
+     * 文字ごとの「まだ安全に使える回数」。
+     * 「ン」で終わる語とそれ以外を分けて数え、
+     * 続けられる語があるかを O(1) で判定する。
+     */
     const remainingByFirst = new Int32Array(letterCount);
+    const remainingEnd = new Int32Array(letterCount);
+    const remainingOther = new Int32Array(letterCount);
 
     for (const cls of classes) {
         classFirst[cls.index] = cls.firstId;
@@ -510,6 +529,12 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
 
         usedCount[c] = k + 1;
         remainingByFirst[classFirst[c]] -= 1;
+
+        if (classEndsN[c] === 1) {
+            remainingEnd[classFirst[c]] -= 1;
+        } else {
+            remainingOther[classFirst[c]] -= 1;
+        }
     }
 
     function undoClass(c) {
@@ -521,6 +546,12 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
 
         usedCount[c] = k - 1;
         remainingByFirst[classFirst[c]] += 1;
+
+        if (classEndsN[c] === 1) {
+            remainingEnd[classFirst[c]] += 1;
+        } else {
+            remainingOther[classFirst[c]] += 1;
+        }
     }
 
     /* ---------------------------------------------------------
@@ -546,21 +577,27 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
     }
 
     function hasSafeMove(letterId, nEnd) {
-        const list = classesByFirst[letterId];
-
-        for (let i = 0; i < list.length; i += 1) {
-            if (isSafeClassMove(list[i], nEnd)) {
-                return true;
-            }
+        if (remainingOther[letterId] > 0) {
+            return true;
         }
 
-        return false;
+        if (remainingEnd[letterId] <= 0) {
+            return false;
+        }
+
+        if (nRule === "unlimited") {
+            return true;
+        }
+
+        return nRule === "once" && nEnd < 1;
     }
 
     /*
      * 安全な手を buffer に入れ、相手の選択肢が少ない順に並べる。
      * 個数を返す。
      */
+    const scoreScratch = new Int32Array(maxMovesPerLetter);
+
     function collectMoves(letterId, nEnd, buffer, sorted) {
         const list = classesByFirst[letterId];
 
@@ -576,39 +613,59 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
         }
 
         if (sorted && count > 1) {
+            /* 相手の選択肢が少ない手(=勝ちやすい手)を先に調べる */
+            for (let i = 0; i < count; i += 1) {
+                scoreScratch[i] = replyScore(buffer[i], nEnd);
+            }
+
             for (let i = 1; i < count; i += 1) {
                 const c = buffer[i];
-                const key = replyScore(c);
+                const key = scoreScratch[i];
 
                 let j = i - 1;
 
-                while (j >= 0 && replyScore(buffer[j]) > key) {
+                while (j >= 0 && scoreScratch[j] > key) {
                     buffer[j + 1] = buffer[j];
+                    scoreScratch[j + 1] = scoreScratch[j];
                     j -= 1;
                 }
 
                 buffer[j + 1] = c;
+                scoreScratch[j + 1] = key;
             }
         }
 
         return count;
     }
 
-    function replyScore(c) {
+    /* 手 c を指した後に、相手が安全に指せる語の数(少ないほど有利) */
+    function replyScore(c, nEnd) {
         if (isSpecialRule) {
-            return 0;
+            applyClass(c);
+
+            const next = childLetter(c, nextNEnd(c, nEnd));
+
+            const score =
+                next < 0
+                    ? -1
+                    : remainingByFirst[next];
+
+            undoClass(c);
+
+            return score;
         }
 
         const next = classLast[c];
 
-        /* 手を指す前の値なので、同じクラスなら自分の分は引いておく */
-        let remaining = remainingByFirst[next];
-
-        if (classFirst[c] === next) {
-            remaining -= 1;
+        if (next < 0) {
+            return -1;
         }
 
-        return remaining;
+        /* 手を指す前の値なので、同じ文字から続くなら自分の分は引く */
+        return (
+            remainingByFirst[next] -
+            (classFirst[c] === next ? 1 : 0)
+        );
     }
 
     function nextNEnd(c, nEnd) {
@@ -1035,6 +1092,8 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
         hash1 = 0;
         hash2 = 0;
         remainingByFirst.fill(0);
+        remainingEnd.fill(0);
+        remainingOther.fill(0);
 
         for (const cls of classes) {
             let used = 0;
@@ -1054,6 +1113,12 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
             hash2 ^= zobrist2[classOffset[cls.index] + used];
 
             remainingByFirst[cls.firstId] += cls.cap - used;
+
+            if (cls.endsN) {
+                remainingEnd[cls.firstId] += cls.cap - used;
+            } else {
+                remainingOther[cls.firstId] += cls.cap - used;
+            }
         }
     }
 
@@ -1126,6 +1191,12 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
 
         resetBudget(input.overrides);
 
+        /* 解析の合間にだけ、いっぱいになったメモを空にする */
+        if (memo.isNearlyFull() || distanceMemo.isNearlyFull()) {
+            memo.clear();
+            distanceMemo.clear();
+        }
+
         const letter = normalizeLetterValue(input.requiredLetter);
         const letterId = letterToId.get(letter);
 
@@ -1195,6 +1266,472 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
             principalVariation: variation,
             statistics: stats,
             limited: false
+        };
+    }
+
+    /* ---------------------------------------------------------
+       時間制限つきの着手選択(モンテカルロ木探索+部分的な完全解析)
+
+       解き切れない局面(特殊ルールの序盤など)で、
+       できるだけ良い手を選ぶために使う。
+
+       - 木探索で有望な手を深く調べる(UCB)
+       - 木の端からは、最後までランダムに指して勝敗を見る
+       - 新しい局面では、小さな予算で完全解析を試し、勝敗が確定したら
+         確定結果として木に記録する(終盤に近いほど正確になる)
+    --------------------------------------------------------- */
+
+    function createTreeNode(parent, cls, letter, nEnd) {
+        return {
+            parent,
+            cls,
+            letter,
+            nEnd,
+            children: [],
+            untried: null,
+            visits: 0,
+            wins: 0,
+            /* 0=未確定 / 1=この局面へ着手した側が勝つ / 2=その側が負ける */
+            proven: 0
+        };
+    }
+
+    /* 現在の探索状態から、小さな予算で勝敗を確定させてみる */
+    function quickSolve(letterId, nEnd, states) {
+        const savedMax = maxStates;
+        const savedDeadline = deadline;
+        const savedVisited = visitedStates;
+
+        aborted = false;
+        visitedStates = 0;
+        maxStates = states;
+        deadline = Date.now() + 1000;
+
+        const result = solve(letterId, nEnd, 0);
+
+        const solved = !aborted && result !== RESULT.UNKNOWN;
+
+        aborted = false;
+        maxStates = savedMax;
+        deadline = savedDeadline;
+        visitedStates = savedVisited;
+
+        return solved ? result : RESULT.UNKNOWN;
+    }
+
+    /*
+     * letterId の手番側から最後までランダムに指し、
+     * 「その手番側が勝つか」を返す。状態は元に戻す。
+     */
+    function playout(letterId, nEnd) {
+        const stack = [];
+        const buffer = getOrderBuffer(0);
+
+        let letter = letterId;
+        let n = nEnd;
+        let toMoveWins = false;
+
+        for (let ply = 0; ply < 5000; ply += 1) {
+            const count = collectMoves(letter, n, buffer, false);
+
+            if (count === 0) {
+                /* 指せる手がない側の負け */
+                toMoveWins = ply % 2 === 1;
+                break;
+            }
+
+            /* 数手だけ候補を見て、即勝ちできる手があれば選ぶ */
+            let chosen = -1;
+            let chosenNext = -1;
+            let instant = false;
+
+            const tries = Math.min(count, 3);
+
+            for (let t = 0; t < tries; t += 1) {
+                const c = buffer[Math.floor(Math.random() * count)];
+
+                applyClass(c);
+
+                const next = childLetter(c, nextNEnd(c, n));
+
+                undoClass(c);
+
+                if (next < 0) {
+                    chosen = c;
+                    instant = true;
+                    break;
+                }
+
+                if (t === 0) {
+                    chosen = c;
+                    chosenNext = next;
+                }
+            }
+
+            const childN = nextNEnd(chosen, n);
+
+            applyClass(chosen);
+            stack.push(chosen);
+
+            if (instant) {
+                /* 着手側の勝ち */
+                toMoveWins = ply % 2 === 0;
+                break;
+            }
+
+            letter = chosenNext;
+            n = childN;
+        }
+
+        for (let i = stack.length - 1; i >= 0; i -= 1) {
+            undoClass(stack[i]);
+        }
+
+        return toMoveWins;
+    }
+
+    /* 子ノードを作り、終局・確定していれば proven を設定する */
+    function expandChild(node, cls, quickStates) {
+        const childN = nextNEnd(cls, node.nEnd);
+
+        applyClass(cls);
+
+        const next = childLetter(cls, childN);
+
+        const child = createTreeNode(node, cls, next, childN);
+
+        if (next < 0) {
+            /* 相手に安全な続きがない = 着手側の勝ち */
+            child.proven = 1;
+        } else {
+            const result = quickSolve(next, childN, quickStates);
+
+            if (result === RESULT.LOSE) {
+                child.proven = 1;
+            } else if (result === RESULT.WIN) {
+                child.proven = 2;
+            }
+        }
+
+        undoClass(cls);
+
+        node.children.push(child);
+
+        return child;
+    }
+
+    /* 子の確定結果から、親の確定結果を求める */
+    function updateProven(node) {
+        if (node.proven !== 0 || node.untried === null) {
+            return;
+        }
+
+        let allLose = node.untried.length === 0;
+
+        for (const child of node.children) {
+            if (child.proven === 1) {
+                /* 相手(次の手番側)が勝つ手がある */
+                node.proven = 2;
+                return;
+            }
+
+            if (child.proven !== 2) {
+                allLose = false;
+            }
+        }
+
+        if (allLose) {
+            node.proven = 1;
+        }
+    }
+
+    function selectChild(node, exploration) {
+        let best = null;
+        let bestScore = -Infinity;
+
+        const logVisits = Math.log(node.visits + 1);
+
+        for (const child of node.children) {
+            /* その手で着手側が負けると確定している手は選ばない */
+            if (child.proven === 2) {
+                continue;
+            }
+
+            let score;
+
+            if (child.proven === 1) {
+                score = Infinity;
+            } else {
+                score =
+                    child.wins / child.visits +
+                    exploration *
+                        Math.sqrt(logVisits / child.visits);
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = child;
+            }
+        }
+
+        return best;
+    }
+
+    /*
+     * 時間内で最善手を探す。
+     *
+     * suggestMove({
+     *   requiredLetter, usedWords, nEndCount,
+     *   timeLimitMilliseconds,  // 既定 3000
+     *   quickSolveStates,       // 新しい局面で試す完全解析の上限(既定 1500)
+     *   exploration             // 既定 0.9
+     * })
+     *
+     * 戻り値: { found, bestMove, winRate, proven("WIN"/"LOSE"/null),
+     *           simulations, candidates[] }
+     */
+    function suggestMove(rawInput = {}) {
+        const timeLimit = positiveInt(
+            rawInput.timeLimitMilliseconds,
+            3000
+        );
+
+        const quickStates = positiveInt(
+            rawInput.quickSolveStates,
+            1500
+        );
+
+        const exploration =
+            Number(rawInput.exploration) > 0
+                ? Number(rawInput.exploration)
+                : 0.9;
+
+        const empty = {
+            found: false,
+            bestMove: null,
+            winRate: null,
+            proven: null,
+            simulations: 0,
+            candidates: []
+        };
+
+        const letterId = letterToId.get(
+            normalizeLetterValue(
+                rawInput.requiredLetter ?? rawInput.currentLetter
+            )
+        );
+
+        if (letterId === undefined) {
+            return empty;
+        }
+
+        resetBudget({});
+
+        loadUsedWords(rawInput.usedWords);
+
+        const nEnd = normalizeNEnd(rawInput.nEndCount);
+
+        const root = createTreeNode(null, -1, letterId, nEnd);
+
+        const endAt = Date.now() + timeLimit;
+
+        let simulations = 0;
+
+        while (Date.now() < endAt) {
+            /* --- 選択 --- */
+            let node = root;
+            const path = [];
+
+            for (;;) {
+                if (node.untried === null) {
+                    const buffer = getOrderBuffer(0);
+
+                    const count = collectMoves(
+                        node.letter,
+                        node.nEnd,
+                        buffer,
+                        true
+                    );
+
+                    /* 有望そうな手(相手の選択肢が少ない手)を先に試す */
+                    node.untried = Array.from(
+                        buffer.subarray(0, count)
+                    ).reverse();
+
+                    updateProven(node);
+                }
+
+                if (node.proven !== 0) {
+                    break;
+                }
+
+                if (node.untried.length > 0) {
+                    break;
+                }
+
+                const child = selectChild(node, exploration);
+
+                if (!child) {
+                    break;
+                }
+
+                applyClass(child.cls);
+                path.push(child.cls);
+
+                node = child;
+
+                if (node.proven !== 0 || node.letter < 0) {
+                    break;
+                }
+            }
+
+            /* --- 拡張 --- */
+            let leaf = node;
+            let leafWon;
+
+            if (leaf.proven === 0 && leaf.untried && leaf.untried.length > 0) {
+                const cls = leaf.untried.pop();
+
+                const child = expandChild(leaf, cls, quickStates);
+
+                applyClass(cls);
+                path.push(cls);
+
+                leaf = child;
+            }
+
+            /* --- 結果 --- */
+            if (leaf.proven === 1) {
+                leafWon = true;
+            } else if (leaf.proven === 2) {
+                leafWon = false;
+            } else {
+                /* 葉の手番側が勝つか → 着手側が勝つかへ反転 */
+                leafWon = !playout(leaf.letter, leaf.nEnd);
+            }
+
+            for (let i = path.length - 1; i >= 0; i -= 1) {
+                undoClass(path[i]);
+            }
+
+            /* --- 逆伝播 --- */
+            let current = leaf;
+            let moverWon = leafWon;
+
+            while (current) {
+                current.visits += 1;
+
+                if (moverWon) {
+                    current.wins += 1;
+                }
+
+                if (current.parent) {
+                    updateProven(current.parent);
+                }
+
+                current = current.parent;
+                moverWon = !moverWon;
+            }
+
+            simulations += 1;
+
+            if (root.proven !== 0) {
+                /* 根の勝敗が確定したら、これ以上は不要 */
+                break;
+            }
+        }
+
+        /* --- 手の決定 --- */
+        let best = null;
+
+        const winningChild =
+            root.children.find(child => child.proven === 1) ?? null;
+
+        if (winningChild) {
+            best = winningChild;
+        } else {
+            for (const child of root.children) {
+                if (child.proven === 2) {
+                    continue;
+                }
+
+                if (
+                    !best ||
+                    child.visits > best.visits ||
+                    (
+                        child.visits === best.visits &&
+                        child.wins > best.wins
+                    )
+                ) {
+                    best = child;
+                }
+            }
+
+            /* すべての手が負けでも、最も試した手(粘れる手)を返す */
+            if (!best) {
+                for (const child of root.children) {
+                    if (!best || child.visits > best.visits) {
+                        best = child;
+                    }
+                }
+            }
+        }
+
+        if (!best) {
+            return { ...empty, simulations };
+        }
+
+        const members = classes[best.cls].members;
+
+        const group =
+            members.find(g => realUses[g.index] < g.limit) ??
+            members[0];
+
+        return {
+            found: true,
+            bestMove: toPublicMove(group),
+
+            winRate:
+                best.visits > 0
+                    ? best.wins / best.visits
+                    : null,
+
+            proven:
+                best.proven === 1
+                    ? OUTCOME.WIN
+                    : (
+                        root.proven === 1
+                            ? OUTCOME.LOSE
+                            : null
+                    ),
+
+            simulations,
+
+            candidates: root.children.map(child => {
+                const cMembers = classes[child.cls].members;
+
+                const g =
+                    cMembers.find(m => realUses[m.index] < m.limit) ??
+                    cMembers[0];
+
+                return {
+                    word: g.entry.name,
+                    reading: g.reading,
+                    visits: child.visits,
+                    winRate:
+                        child.visits > 0
+                            ? child.wins / child.visits
+                            : null,
+                    proven:
+                        child.proven === 1
+                            ? OUTCOME.WIN
+                            : (
+                                child.proven === 2
+                                    ? OUTCOME.LOSE
+                                    : null
+                            )
+                };
+            })
         };
     }
 
@@ -1309,6 +1846,7 @@ function createExactSolver(rawSettings = {}, rawOptions = {}) {
     return {
         analyzeStart,
         analyzePosition,
+        suggestMove,
         solve: solveCompat,
         solveOutcome: solveCompat,
         clear,

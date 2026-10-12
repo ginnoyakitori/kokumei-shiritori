@@ -93,6 +93,16 @@ const EXACT_ANALYSIS = {
         deadlineMilliseconds: 8000
     },
 
+    /*
+     * 特殊ルール用。開始局面からは解き切れないため、
+     * 棋譜の最後から1手ずつさかのぼって解析する。
+     * 1局面あたりの上限を大きめにしている。
+     */
+    special: {
+        maxStates: 6000000,
+        deadlineMilliseconds: 5000
+    },
+
     budgetMilliseconds: 30000,
 
     minCallMilliseconds: 200
@@ -752,11 +762,14 @@ function analyzeStateCached(
             baseOptions
         );
 
+    /* 打ち切り時刻は呼び出しごとに変わるので、キャッシュのキーに含めない */
+    const { deadlineAt, ...keyOptions } = options;
+
     const key =
         createStateKey(
             state,
             settings,
-            options
+            keyOptions
         );
 
     if (cache.has(key)) {
@@ -783,25 +796,52 @@ function analyzeStateCached(
    完全解析(exact-solver)による局面評価
 ========================================================= */
 
-/**
- * 対局解析用の完全解析ソルバーを作る。
- * 通常しりとりルール以外では使えないため null を返す。
+/*
+ * 完全解析ソルバーは設定ごとに使い回す。
+ *
+ * 探索済みの局面(メモ)が次の対局解析でも再利用されるため、
+ * 同じ設定の2回目以降は大幅に速くなる。
+ * 開始局面の結果(開始文字ごと)も一緒に保存する。
+ *
+ * メモリ節約のため、保持する設定数とメモの大きさに上限を付ける。
  */
-function createExactAnalysisSolver(settings) {
-    if (settings.rule !== "normal") {
-        return null;
+const EXACT_SOLVER_CACHE_LIMIT = 2;
+const EXACT_MEMO_SLOTS = 1 << 23;
+
+const exactSolverCache = new Map();
+
+/**
+ * 設定に対応する { solver, initialResults } を返す。
+ */
+function getExactSolverEntry(settings) {
+    const key = JSON.stringify(settings);
+
+    let entry = exactSolverCache.get(key);
+
+    if (entry) {
+        /* 最近使った順に並べ直す */
+        exactSolverCache.delete(key);
+        exactSolverCache.set(key, entry);
+
+        return entry;
     }
 
     const config = getExactConfig(settings);
 
     try {
-        return createExactSolver(
-            settings,
-            {
-                maxStates: config.maxStates,
-                deadlineMilliseconds: config.deadlineMilliseconds
-            }
-        );
+        entry = {
+            solver: createExactSolver(
+                settings,
+                {
+                    maxStates: config.maxStates,
+                    deadlineMilliseconds: config.deadlineMilliseconds,
+                    maxMemoSlots: EXACT_MEMO_SLOTS
+                }
+            ),
+
+            /* 開始文字 → 完全解析の結果 */
+            initialResults: new Map()
+        };
     } catch (error) {
         console.error(
             "[analyzer] exact-solverの作成に失敗しました。",
@@ -810,9 +850,23 @@ function createExactAnalysisSolver(settings) {
 
         return null;
     }
+
+    while (exactSolverCache.size >= EXACT_SOLVER_CACHE_LIMIT) {
+        exactSolverCache.delete(
+            exactSolverCache.keys().next().value
+        );
+    }
+
+    exactSolverCache.set(key, entry);
+
+    return entry;
 }
 
 function getExactConfig(settings) {
+    if (settings.rule !== "normal") {
+        return EXACT_ANALYSIS.special;
+    }
+
     return settings.wordList === "countries"
         ? EXACT_ANALYSIS.countries
         : EXACT_ANALYSIS.other;
@@ -854,21 +908,25 @@ function getExactCallLimits(context) {
 }
 
 /**
- * 完全解析で局面を評価する。
- *
- * 戻り値:
- *   null      解析できない(特殊ルール・上限到達・時間超過・エラー)
- *   オブジェクト 勝敗が確定した評価
- *
- * winning は「現在の手番側が勝つか」。
- *
- * 勝勢局面:
- *   最短で勝つ手を bestMove / distance にする。
- *
- * 敗勢局面:
- *   負けるまで最も長く粘れる手を bestMove / distance にする。
+ * 完全解析を実行し、solver の結果(生)を返す。
+ * 解析できなければ null。
  */
-function analyzeStateExact(state, context) {
+function runExactAnalysis(state, context) {
+    /*
+     * 続ける文字がない局面(特殊ルールで着手側が勝った直後)は、
+     * 手番側に指せる手がないので、探索せずに負けとする。
+     */
+    if (!state.currentLetter) {
+        return {
+            exact: true,
+            winning: false,
+            distance: 0,
+            bestMove: null,
+            principalVariation: [],
+            statistics: { visitedStates: 0 }
+        };
+    }
+
     const limits = getExactCallLimits(context);
 
     if (!limits) {
@@ -894,14 +952,17 @@ function analyzeStateExact(state, context) {
         return null;
     }
 
-    if (!analysis?.exact) {
-        return null;
-    }
+    return analysis?.exact
+        ? analysis
+        : null;
+}
 
-    const winning = analysis.winning === true;
-
+/**
+ * solver の結果を、解析結果の形式へ変換する。
+ */
+function toExactEvaluation(analysis) {
     return {
-        winning,
+        winning: analysis.winning === true,
 
         /*
          * 勝勢なら最短勝利距離、
@@ -929,6 +990,129 @@ function analyzeStateExact(state, context) {
 }
 
 /**
+ * 完全解析で局面を評価する。
+ *
+ * 戻り値:
+ *   null      解析できない(上限到達・時間超過・エラー)
+ *   オブジェクト 勝敗が確定した評価
+ *
+ * winning は「現在の手番側が勝つか」。
+ * さかのぼり解析(特殊ルール)で先に解いた局面があれば、それを使う。
+ */
+function analyzeStateExact(state, context) {
+    if (!context?.solver) {
+        return null;
+    }
+
+    const ply = state.usedWords?.length ?? 0;
+
+    const prepared = context.preAnalyzed?.get(ply);
+
+    if (
+        prepared &&
+        prepared.letter === state.currentLetter
+    ) {
+        return toExactEvaluation(prepared.analysis);
+    }
+
+    const analysis = runExactAnalysis(state, context);
+
+    return analysis
+        ? toExactEvaluation(analysis)
+        : null;
+}
+
+/**
+ * 棋譜の最後から先頭へ向かって、1局面ずつ完全解析する。
+ *
+ * 特殊ルールは開始局面から解き切れないが、終盤は使用済みの単語が
+ * 多く探索が小さい。後ろから解くと、先に解いた局面のメモが
+ * 前の局面の解析に使われる。
+ * 時間(または1局面あたりの上限)に達したところで止め、
+ * それより前の局面は限定解析にする。
+ *
+ * 戻り値: 完全解析できた最も前の局面の手数(なければ null)
+ */
+function analyzeBackward(history, startLetter, settings, context) {
+    if (!context?.solver) {
+        return null;
+    }
+
+    let state = {
+        currentLetter: startLetter,
+        usedWords: [],
+        history: [],
+        nEndCount: 0
+    };
+
+    const states = [state];
+
+    for (const recorded of history) {
+        const applied = applyActualMove(
+            state,
+            recorded,
+            settings
+        );
+
+        /* 不正な手・即負けの手は、その手を指す前の局面までを対象にする */
+        if (!applied.valid || applied.terminalLoss) {
+            break;
+        }
+
+        state = applied.state;
+        states.push(state);
+    }
+
+    context.preAnalyzed = new Map();
+
+    let earliest = null;
+
+    for (let ply = states.length - 1; ply >= 0; ply -= 1) {
+        const target = states[ply];
+
+        const analysis = runExactAnalysis(target, context);
+
+        if (!analysis) {
+            break;
+        }
+
+        context.preAnalyzed.set(
+            ply,
+            {
+                letter: target.currentLetter,
+                analysis
+            }
+        );
+
+        earliest = ply;
+    }
+
+    return earliest;
+}
+
+/*
+ * 限定解析(完全解析できなかった局面)の時間制限。
+ *
+ * perCallMilliseconds: 1局面あたり
+ * hardLimitMilliseconds: 対局解析全体(ワーカーのタイムアウトより短くする)
+ *   これを過ぎると、限定解析は最小限の探索だけで返す。
+ */
+const LIMITED_ANALYSIS = {
+    perCallMilliseconds: 500,
+    hardLimitMilliseconds: 38000
+};
+
+function getLimitedDeadline(context) {
+    const now = Date.now();
+
+    const own = now + LIMITED_ANALYSIS.perCallMilliseconds;
+
+    return context?.hardDeadlineAt
+        ? Math.min(own, context.hardDeadlineAt)
+        : own;
+}
+
+/**
  * 完全解析を優先し、できなければ限定解析で局面を評価する。
  */
 function analyzeStateAuto(
@@ -943,7 +1127,10 @@ function analyzeStateAuto(
         analyzeStateCached(
             state,
             settings,
-            baseOptions,
+            {
+                ...baseOptions,
+                deadlineAt: getLimitedDeadline(context)
+            },
             cache
         )
     );
@@ -968,10 +1155,7 @@ function analyzeInitialPosition(
      * 初期局面は完全解析できても、その後の局面が
      * 別の探索予算で限定解析になりやすかった。
      */
-    if (
-        settings.rule === "normal" &&
-        context?.solver
-    ) {
+    if (context?.solver) {
         const state = {
             currentLetter:
                 startLetter,
@@ -986,10 +1170,24 @@ function analyzeInitialPosition(
                 0
         };
 
-        let exactResult = null;
+        /*
+         * 開始局面は履歴に関係なく「設定+開始文字」で決まるので、
+         * 一度解析した結果は保存して使い回す。
+         */
+        let exactResult =
+            context.initialResults?.get(startLetter) ??
+            context.preAnalyzed?.get(0)?.analysis ??
+            null;
 
+        /* さかのぼり解析の対象外なら、通常ルールだけ開始局面を解く */
         const limits =
-            getExactCallLimits(context);
+            (
+                exactResult ||
+                settings.rule !== "normal" ||
+                context.preAnalyzed
+            )
+                ? null
+                : getExactCallLimits(context);
 
         if (limits) {
             try {
@@ -1002,6 +1200,16 @@ function analyzeInitialPosition(
                         deadlineMilliseconds:
                             limits.deadlineMilliseconds
                     });
+
+                if (
+                    exactResult?.exact &&
+                    settings.rule === "normal"
+                ) {
+                    context.initialResults?.set(
+                        startLetter,
+                        exactResult
+                    );
+                }
             } catch (error) {
                 console.error(
                     "[analyzer] 初期局面のexact解析に失敗しました。",
@@ -1092,7 +1300,10 @@ function analyzeInitialPosition(
         analyzeStateCached(
             state,
             settings,
-            initialOptions,
+            {
+                ...initialOptions,
+                deadlineAt: getLimitedDeadline(context)
+            },
             cache
         );
 
@@ -1706,11 +1917,31 @@ function resolveActualWinner(
 function createSummary(
     initial,
     actualWinner,
-    turningPoint
+    turningPoint,
+    extra = {}
 ) {
     const lines = [
         `初期局面は${initial.verdict}です。`
     ];
+
+    /* 特殊ルール:どこから完全解析できたか */
+    if (extra.specialRule) {
+        if (extra.exactFromPly === 0) {
+            lines.push("棋譜全体を完全解析しました。");
+        } else if (extra.exactFromPly !== null &&
+            extra.exactFromPly !== undefined) {
+            lines.push(
+                "特殊ルールは分岐が多いため、" +
+                `${extra.exactFromPly + 1}手目以降を完全解析しました。` +
+                "それより前は限定解析です。"
+            );
+        } else {
+            lines.push(
+                "特殊ルールは分岐が多く、" +
+                "完全解析できる局面がありませんでした。"
+            );
+        }
+    }
 
     if (initial.limited) {
         lines.push(
@@ -1824,8 +2055,11 @@ function analyze(
      */
     const cache = new Map();
 
+    const exactEntry = getExactSolverEntry(settings);
+
     const context = {
-        solver: createExactAnalysisSolver(settings),
+        solver: exactEntry?.solver ?? null,
+        initialResults: exactEntry?.initialResults ?? null,
         config: getExactConfig(settings),
         startedAt,
 
@@ -1833,8 +2067,26 @@ function analyze(
         deadlineAt:
             startedAt + EXACT_ANALYSIS.budgetMilliseconds,
 
+        /* 限定解析も含めた、対局解析全体の打ち切り時刻 */
+        hardDeadlineAt:
+            startedAt + LIMITED_ANALYSIS.hardLimitMilliseconds,
+
         budgetExhausted: false
     };
+
+    /*
+     * 通常ルール以外(特殊ルール)は開始局面から解き切れないので、
+     * 棋譜の最後からさかのぼって完全解析する。
+     */
+    const exactFromPly =
+        settings.rule !== "normal"
+            ? analyzeBackward(
+                history,
+                startLetter,
+                settings,
+                context
+            )
+            : null;
 
     const initial =
         analyzeInitialPosition(
@@ -1917,7 +2169,11 @@ function analyze(
             createSummary(
                 initial,
                 actualWinner,
-                detail.firstTurningPoint
+                detail.firstTurningPoint,
+                {
+                    specialRule: settings.rule !== "normal",
+                    exactFromPly
+                }
             ),
 
         analysisInfo: {
@@ -1931,6 +2187,12 @@ function analyze(
 
             exactBudgetExhausted:
                 context.budgetExhausted === true,
+
+            /*
+             * 特殊ルール:完全解析できた最も前の局面の手数。
+             * この手数以降(棋譜の後半)が完全解析。null は解析なし。
+             */
+            exactFromPly,
 
             exactMoveCount:
                 detail.moves.filter(
@@ -2068,7 +2330,98 @@ function analyzePosition({
 ========================================================= */
 
 function clearCache() {
+    exactSolverCache.clear();
+
     return cpu.clearAnalysisCache();
+}
+
+
+/* =========================================================
+   開始局面の事前解析
+========================================================= */
+
+/**
+ * 設定に対する全開始文字の解析を先に済ませておく。
+ *
+ * 対局解析で開始局面の結果をすぐ返せるようになり、
+ * 探索済みの局面もソルバーに残る。
+ * 起動直後や空き時間に、よく使う設定で呼び出す想定。
+ *
+ * 戻り値: { solved, unsolved, elapsedMilliseconds }
+ */
+function warmUp(rawSettings = {}, options = {}) {
+    const settings = normalizeSettings(rawSettings);
+
+    const entry = getExactSolverEntry(settings);
+
+    if (!entry) {
+        return {
+            solved: 0,
+            unsolved: 0,
+            elapsedMilliseconds: 0
+        };
+    }
+
+    const startedAt = Date.now();
+
+    const budgetMilliseconds =
+        Number(options.budgetMilliseconds) > 0
+            ? Number(options.budgetMilliseconds)
+            : EXACT_ANALYSIS.budgetMilliseconds;
+
+    const config = getExactConfig(settings);
+
+    const letters = new Set();
+
+    for (const word of logic.getWords(settings)) {
+        const letter = logic.getFirstLetter(word, settings);
+
+        if (letter) {
+            letters.add(letter);
+        }
+    }
+
+    let solved = 0;
+    let unsolved = 0;
+
+    for (const letter of letters) {
+        if (entry.initialResults.has(letter)) {
+            solved += 1;
+            continue;
+        }
+
+        const remaining =
+            budgetMilliseconds - (Date.now() - startedAt);
+
+        if (remaining < EXACT_ANALYSIS.minCallMilliseconds) {
+            unsolved += 1;
+            continue;
+        }
+
+        const result = entry.solver.analyzePosition({
+            requiredLetter: letter,
+            usedWords: [],
+            nEndCount: 0,
+            maxStates: config.maxStates,
+            deadlineMilliseconds: Math.min(
+                config.deadlineMilliseconds,
+                Math.floor(remaining)
+            )
+        });
+
+        if (result?.exact) {
+            entry.initialResults.set(letter, result);
+            solved += 1;
+        } else {
+            unsolved += 1;
+        }
+    }
+
+    return {
+        solved,
+        unsolved,
+        elapsedMilliseconds: Date.now() - startedAt
+    };
 }
 
 
@@ -2080,6 +2433,7 @@ module.exports = {
     analyze,
     analyzePosition,
     clearCache,
+    warmUp,
 
     normalizeHistory,
     normalizeSettings,
