@@ -61,6 +61,12 @@ const elements = {
     cpuSettingsGroup:
         document.getElementById("cpuSettingsGroup"),
 
+    guideSettingsGroup:
+        document.getElementById("guideSettingsGroup"),
+
+    guideEnabledInput:
+        document.getElementById("guideEnabled"),
+
 
     matchingStatus:
         document.getElementById("matchingStatus"),
@@ -1144,6 +1150,17 @@ function openSettings(mode) {
     elements.cpuSettingsGroup.hidden =
         mode !== "cpu";
 
+    /*
+     * 初心者ガイドはCPU対戦だけで使う。
+     * オンライン対戦では項目を隠し、オフにしておく。
+     */
+    elements.guideSettingsGroup.hidden =
+        mode !== "cpu";
+
+    if (mode !== "cpu") {
+        elements.guideEnabledInput.checked = false;
+    }
+
     elements.settingsError.hidden = true;
 
     showScreen("settingsScreen");
@@ -1183,6 +1200,7 @@ function readSettings() {
             "easy",
 
         guideEnabled:
+            gameState.mode === "cpu" &&
             formData.get(
                 "guideEnabled"
             ) === "true"
