@@ -11,6 +11,7 @@ const matchmaking = require("./src/matchmaking");
 const analysisManager = require("./src/analysis-manager");
 const {
     normalizeSettings: sanitizeSettings,
+    createMatchKey,
     pickRuleSettings
 } = require("./src/settings");
 
@@ -150,11 +151,63 @@ function allow(socket, key, max, windowMs) {
 
 
 /* =========================================================
+   開始局面の事前解析(モード選択中に裏で行う)
+========================================================= */
+
+const warmUpState = new Map(); /* key => { done, running, tries } */
+
+async function warmUpForSettings(settings) {
+    /* 特殊ルールは事前解析の対象外 */
+    if (settings.rule !== "normal") {
+        return;
+    }
+
+    const key = createMatchKey(settings);
+    const state = warmUpState.get(key) ?? { done: false, running: false, tries: 0 };
+
+    warmUpState.set(key, state);
+
+    if (state.done || state.running || state.tries >= 2) {
+        return;
+    }
+
+    state.running = true;
+    state.tries += 1;
+
+    try {
+        const result = await analysisManager.warmUp({ settings });
+
+        if (result && !result.skipped) {
+            if (result.unsolved === 0) {
+                state.done = true;
+            }
+        } else {
+            /* 忙しくて見送った場合は試行回数に数えない */
+            state.tries -= 1;
+        }
+    } catch {
+        /* 事前解析の失敗は無視する */
+    } finally {
+        state.running = false;
+    }
+}
+
+
+/* =========================================================
    Socket.IO接続処理
 ========================================================= */
 
 io.on("connection", socket => {
     console.log(`[接続] ${socket.id}`);
+
+    /* モード選択中などの空き時間に、開始局面を事前解析する */
+    socket.on("warmUp", rawSettings => {
+        if (!allow(socket, "warmUp", 5, 10000)) {
+            return;
+        }
+
+        warmUpForSettings(sanitizeSettings(rawSettings)).catch(() => {});
+    });
 
     /* CPU対戦用の開始文字を取得する */
     socket.on("getRandomStartLetter", rawSettings => {

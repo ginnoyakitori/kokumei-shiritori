@@ -428,32 +428,93 @@ function getOpponentName(player) {
    局面表示
 ========================================================= */
 
+/*
+ * 推定解析の目安。
+ * 手番側の推定勝率がこの値以上なら手番側有利、
+ * (1 - この値)以下なら相手有利、間は互角とする。
+ */
+const ESTIMATE = {
+    advantageThreshold: 0.6,
+
+    initialMilliseconds: 400,
+    perPositionMilliseconds: 150,
+
+    /* 対局解析全体の残り時間がこれ未満なら、推定は行わない */
+    minRemainingMilliseconds: 400,
+
+    /* これ未満の試行回数では推定を信用しない */
+    minSimulations: 20
+};
+
+/**
+ * 局面の評価を表示用のラベルにする。
+ *
+ * evaluation.limited !== true : 勝敗が確定している(必勝解析)
+ * evaluation.limited === true : 確定できていない(推定解析)
+ *
+ * 推定解析では、手番側の推定勝率(moverWinRate)から有利・不利・互角を決める。
+ * 推定できなかった場合は「優劣不明」とし、
+ * 「手番側の負け」とは決して扱わない。
+ */
 function positionLabel(
-    winning,
-    index,
-    limited
+    evaluation,
+    index
 ) {
     const current =
         getTurnName(index);
 
-    const winner =
-        winning
-            ? current
-            : getOpponentName(
-                current
-            );
+    const opponent =
+        getOpponentName(current);
+
+    if (evaluation.limited !== true) {
+        const winner =
+            evaluation.winning
+                ? current
+                : opponent;
+
+        return {
+            currentPlayer: current,
+            winningPlayer: winner,
+            position: `${winner}必勝`,
+            kind: "exact"
+        };
+    }
+
+    const rate =
+        evaluation.moverWinRate;
+
+    if (!Number.isFinite(rate)) {
+        return {
+            currentPlayer: current,
+            winningPlayer: null,
+            position: "優劣不明（推定不能）",
+            kind: "estimate"
+        };
+    }
+
+    if (rate >= ESTIMATE.advantageThreshold) {
+        return {
+            currentPlayer: current,
+            winningPlayer: current,
+            position: `${current}有利（推定）`,
+            kind: "estimate"
+        };
+    }
+
+    if (rate <= 1 - ESTIMATE.advantageThreshold) {
+        return {
+            currentPlayer: current,
+            winningPlayer: opponent,
+            position: `${opponent}有利（推定）`,
+            kind: "estimate"
+        };
+    }
 
     return {
-        currentPlayer:
-            current,
-
-        winningPlayer:
-            winner,
-
-        position:
-            limited
-                ? `${winner}有利（限定解析）`
-                : `${winner}必勝`
+        currentPlayer: current,
+        winningPlayer: null,
+        position: "互角（推定）",
+        kind: "estimate"
     };
 }
 
@@ -1122,8 +1183,14 @@ function analyzeStateAuto(
     cache,
     context
 ) {
-    return (
-        analyzeStateExact(state, context) ??
+    const exact =
+        analyzeStateExact(state, context);
+
+    if (exact) {
+        return exact;
+    }
+
+    const result =
         analyzeStateCached(
             state,
             settings,
@@ -1132,8 +1199,125 @@ function analyzeStateAuto(
                 deadlineAt: getLimitedDeadline(context)
             },
             cache
-        )
+        );
+
+    /* 限定探索で勝敗が証明できた場合は、そのまま返す */
+    if (result.limited !== true) {
+        return result;
+    }
+
+    return withEstimate(
+        result,
+        state,
+        context,
+        ESTIMATE.perPositionMilliseconds
     );
+}
+
+/**
+ * 勝敗が確定していない局面を、モンテカルロ木探索で推定する。
+ *
+ * 戻り値: { winRate(手番側の勝率), bestMove } / 推定できなければ null
+ */
+function estimateEvaluation(state, context, timeLimitMilliseconds) {
+    const solver = context?.solver;
+
+    if (
+        !solver ||
+        typeof solver.suggestMove !== "function" ||
+        !state.currentLetter
+    ) {
+        return null;
+    }
+
+    const remaining =
+        context.hardDeadlineAt
+            ? context.hardDeadlineAt - Date.now()
+            : Number.POSITIVE_INFINITY;
+
+    if (remaining < ESTIMATE.minRemainingMilliseconds) {
+        return null;
+    }
+
+    const timeLimit =
+        Math.max(
+            50,
+            Math.min(
+                timeLimitMilliseconds,
+                Math.floor(remaining / 2)
+            )
+        );
+
+    let suggestion;
+
+    try {
+        suggestion = solver.suggestMove({
+            requiredLetter: state.currentLetter,
+            usedWords: state.usedWords ?? [],
+            nEndCount: Number(state.nEndCount ?? 0),
+            timeLimitMilliseconds: timeLimit
+        });
+    } catch (error) {
+        console.error(
+            "[analyzer] 推定解析に失敗しました。",
+            error
+        );
+
+        return null;
+    }
+
+    if (
+        !suggestion?.found ||
+        suggestion.simulations < ESTIMATE.minSimulations
+    ) {
+        return null;
+    }
+
+    let winRate = suggestion.winRate;
+
+    if (suggestion.proven === "WIN") {
+        winRate = 1;
+    } else if (suggestion.proven === "LOSE") {
+        winRate = 0;
+    }
+
+    if (!Number.isFinite(winRate)) {
+        return null;
+    }
+
+    return {
+        winRate,
+        bestMove: suggestion.bestMove ?? null
+    };
+}
+
+/**
+ * 限定解析の結果に、推定勝率を付ける。
+ * 推定できなければ moverWinRate は null(優劣不明)になる。
+ */
+function withEstimate(
+    result,
+    state,
+    context,
+    timeLimitMilliseconds
+) {
+    const estimate =
+        estimateEvaluation(
+            state,
+            context,
+            timeLimitMilliseconds
+        );
+
+    return {
+        ...result,
+
+        moverWinRate:
+            estimate?.winRate ?? null,
+
+        bestMove:
+            estimate?.bestMove ??
+            result.bestMove
+    };
 }
 
 
@@ -1296,7 +1480,7 @@ function analyzeInitialPosition(
             "initial"
         );
 
-    const result =
+    const rawResult =
         analyzeStateCached(
             state,
             settings,
@@ -1308,16 +1492,34 @@ function analyzeInitialPosition(
         );
 
     const limited =
-        result.limited === true;
+        rawResult.limited === true;
+
+    const result =
+        limited
+            ? withEstimate(
+                rawResult,
+                state,
+                context,
+                ESTIMATE.initialMilliseconds
+            )
+            : rawResult;
+
+    const label =
+        positionLabel(result, 0);
 
     return {
         state,
 
+        /* 推定解析では勝敗は確定していないので null */
         winning:
-            result.winning,
+            limited
+                ? null
+                : result.winning,
 
         distance:
-            result.distance,
+            limited
+                ? null
+                : result.distance,
 
         bestMove:
             result.bestMove,
@@ -1327,6 +1529,9 @@ function analyzeInitialPosition(
         exact:
             false,
 
+        moverWinRate:
+            result.moverWinRate ?? null,
+
         analyzedNodeCount:
             result.analyzedNodeCount,
 
@@ -1334,22 +1539,10 @@ function analyzeInitialPosition(
             initialOptions,
 
         verdict:
-            limited
-                ? (
-                    result.winning
-                        ? "先手有利（限定解析）"
-                        : "後手有利（限定解析）"
-                )
-                : (
-                    result.winning
-                        ? "先手必勝"
-                        : "後手必勝"
-                ),
+            label.position,
 
         winningPlayer:
-            result.winning
-                ? "先手"
-                : "後手",
+            label.winningPlayer,
 
         principalVariation:
             result.principalVariation ?? []
@@ -1374,29 +1567,29 @@ function createMoveComment(move) {
             move.evaluationChangedUnderLimit
         ) {
             return (
-                `${move.player}は限定解析上の最善手を選びました。` +
-                "指す前後で評価表示が変化していますが、" +
-                "探索上限による評価の揺れであり、" +
+                `${move.player}は推定解析上の最善手を選びました。` +
+                "指す前後で推定の優劣が変化していますが、" +
+                "推定のゆらぎであり、" +
                 "勝ち筋を逃したことを意味しません。"
             );
         }
 
         if (move.wasBestMove) {
             return (
-                `${move.player}は限定解析で` +
+                `${move.player}は推定解析で` +
                 "最も評価の高い手を選びました。"
             );
         }
 
         if (move.evaluationChangedUnderLimit) {
             return (
-                "指す前後で評価表示が変化しましたが、" +
-                "限定解析のため勝負の分岐点とは断定できません。"
+                "指す前後で推定の優劣が変化しましたが、" +
+                "推定解析のため勝負の分岐点とは断定できません。"
             );
         }
 
         return (
-            "探索上限に達したため、" +
+            "勝敗を確定できなかったため（推定解析）、" +
             "この手の評価は参考値です。"
         );
     }
@@ -1519,6 +1712,7 @@ function analyzeMoves(
         distance: initialAnalysis.distance,
         bestMove: initialAnalysis.bestMove,
         limited: initialAnalysis.limited,
+        moverWinRate: initialAnalysis.moverWinRate ?? null,
         exact: initialAnalysis.exact === true,
         analyzedNodeCount: initialAnalysis.analyzedNodeCount
     };
@@ -1549,11 +1743,7 @@ function analyzeMoves(
             );
 
         const beforeEval =
-            positionLabel(
-                before.winning,
-                index,
-                before.limited === true
-            );
+            positionLabel(before, index);
 
         const applied =
             applyActualMove(
@@ -1600,8 +1790,15 @@ function analyzeMoves(
                 winningPlayerAfter: winner,
                 bestMove: before.bestMove,
                 wasBestMove: false,
-                optimalDistance: before.distance,
+                optimalDistance:
+                    before.limited === true
+                        ? null
+                        : before.distance,
                 limited: before.limited === true,
+                analysisKind:
+                    before.limited === true
+                        ? "estimate"
+                        : "exact",
                 exact: before.exact === true,
 
                 lostWinningPosition:
@@ -1655,11 +1852,7 @@ function analyzeMoves(
         previousAfterAnalysis = after;
 
         const afterEval =
-            positionLabel(
-                after.winning,
-                index + 1,
-                after.limited === true
-            );
+            positionLabel(after, index + 1);
 
         const bothExact =
             before.exact === true &&
@@ -1691,9 +1884,29 @@ function analyzeMoves(
                     settings
                 );
 
+        /* 優劣が両方わかっていて、それが入れ替わったときだけ「変化」 */
         const evaluationChanged =
+            beforeEval.winningPlayer !== null &&
+            afterEval.winningPlayer !== null &&
             beforeEval.winningPlayer !==
             afterEval.winningPlayer;
+
+        const isLimited =
+            before.limited === true ||
+            after.limited === true;
+
+        /* 手を指した側から見た推定勝率 */
+        const moverWinRateBefore =
+            before.limited === true &&
+            Number.isFinite(before.moverWinRate)
+                ? before.moverWinRate
+                : null;
+
+        const moverWinRateAfter =
+            after.limited === true &&
+            Number.isFinite(after.moverWinRate)
+                ? 1 - after.moverWinRate
+                : null;
 
         const evaluationChangedUnderLimit =
             (
@@ -1728,11 +1941,23 @@ function analyzeMoves(
             winningPlayerAfter: afterEval.winningPlayer,
             bestMove: before.bestMove,
             wasBestMove,
-            optimalDistance: before.distance,
 
-            limited:
-                before.limited === true ||
-                after.limited === true,
+            /* 推定解析では手数は求まらないので null */
+            optimalDistance:
+                before.limited === true
+                    ? null
+                    : before.distance,
+
+            limited: isLimited,
+
+            /* "exact": 必勝解析(確定) / "estimate": 推定解析 */
+            analysisKind:
+                isLimited
+                    ? "estimate"
+                    : "exact",
+
+            moverWinRateBefore,
+            moverWinRateAfter,
 
             exact: bothExact,
 
@@ -1927,26 +2152,26 @@ function createSummary(
     /* 特殊ルール:どこから完全解析できたか */
     if (extra.specialRule) {
         if (extra.exactFromPly === 0) {
-            lines.push("棋譜全体を完全解析しました。");
+            lines.push("棋譜全体を必勝解析（完全解析）しました。");
         } else if (extra.exactFromPly !== null &&
             extra.exactFromPly !== undefined) {
             lines.push(
                 "特殊ルールは分岐が多いため、" +
-                `${extra.exactFromPly + 1}手目以降を完全解析しました。` +
-                "それより前は限定解析です。"
+                `${extra.exactFromPly + 1}手目以降を必勝解析（確定）しました。` +
+                "それより前は推定解析です。"
             );
         } else {
             lines.push(
                 "特殊ルールは分岐が多く、" +
-                "完全解析できる局面がありませんでした。"
+                "勝敗を確定できた局面がありませんでした（すべて推定解析）。"
             );
         }
     }
 
     if (initial.limited) {
         lines.push(
-            "探索上限に達したため、" +
-            "一定手数までの限定解析結果です。"
+            "初期局面は探索上限に達したため推定解析です。" +
+            "有利・不利は目安で、勝敗は確定していません。"
         );
     }
 
@@ -2123,8 +2348,47 @@ function analyze(
 
     const finalLetter = finalState.currentLetter ?? "";
 
+    /* 必勝解析(確定)と推定解析の内訳 */
+    const exactMoveTotal =
+        detail.moves.filter(
+            move => move.analysisKind === "exact"
+        ).length;
+
+    const estimatedMoveTotal =
+        detail.moves.length - exactMoveTotal;
+
+    let analysisMode;
+    let analysisModeLabel;
+    let analysisModeDescription;
+
+    if (!initial.limited && estimatedMoveTotal === 0) {
+        analysisMode = "exact";
+        analysisModeLabel = "必勝解析（確定）";
+        analysisModeDescription =
+            "すべての局面で勝敗を確定させて解析しました。";
+    } else if (!initial.limited || exactMoveTotal > 0) {
+        analysisMode = "partial";
+        analysisModeLabel = "一部のみ必勝解析（確定）";
+        analysisModeDescription =
+            `${exactMoveTotal}手は勝敗が確定、` +
+            `${estimatedMoveTotal}手は推定解析です。` +
+            "推定の部分は有利・不利の目安です。";
+    } else {
+        analysisMode = "estimate";
+        analysisModeLabel = "推定解析";
+        analysisModeDescription =
+            "探索上限に達したため勝敗は確定していません。" +
+            "有利・不利は目安です。";
+    }
+
     return {
         success: true,
+
+        analysisMode,
+        analysisModeLabel,
+        analysisModeDescription,
+        exactMoveCount: exactMoveTotal,
+        estimatedMoveCount: estimatedMoveTotal,
 
         startLetter,
         settings,
@@ -2133,7 +2397,8 @@ function analyze(
         winningPlayer: initial.winningPlayer,
         firstPlayerWinning: initial.winning,
         limited: initial.limited,
-        optimalDistance: initial.distance,
+        optimalDistance:
+            initial.limited ? null : initial.distance,
         bestMove: initial.bestMove,
 
         actualWinner,

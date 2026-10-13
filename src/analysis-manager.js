@@ -418,6 +418,34 @@ function analyzeGame({
 }
 
 /**
+ * 開始局面の事前解析を、解析workerが空いているときだけ行う。
+ * 対局解析を待たせないよう、忙しければ何もせず skipped を返す。
+ */
+function warmUp({
+    settings = {},
+    budgetMilliseconds = 8000
+} = {}) {
+    const lane = lanes.analysis;
+
+    if (lane.closed || lane.current || lane.queue.length > 0) {
+        return Promise.resolve({ skipped: true });
+    }
+
+    const budget = normalizePositiveInteger(budgetMilliseconds, 8000);
+
+    return lane
+        .enqueue(
+            {
+                type: "warm-up",
+                settings: settings ?? {},
+                budgetMilliseconds: budget
+            },
+            budget + 8000
+        )
+        .then(message => message?.result ?? { skipped: true });
+}
+
+/**
  * 対局中の局面を解析する(結果はworker内に保存される)。
  */
 function analyzePosition({
@@ -564,6 +592,7 @@ function normalizePositiveInteger(value, fallback) {
 module.exports = {
     analyzeGame,
     analyzePosition,
+    warmUp,
     cpuMove,
 
     getRoomResults,

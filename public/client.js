@@ -469,7 +469,31 @@ updateConditionalSettings
    Socket.IO接続イベント
 ========================================================= */
 
+let warmUpTimer = null;
+
+/*
+ * モード選択画面を先に表示し、選択している間に
+ * サーバーで開始局面の事前解析を済ませておく。
+ */
+function scheduleWarmUp(delay = 1000) {
+    clearTimeout(warmUpTimer);
+
+    warmUpTimer = setTimeout(() => {
+        if (!socket.connected || gameState.mode) {
+            return;
+        }
+
+        try {
+            socket.emit("warmUp", readSettings());
+        } catch {
+            /* 事前解析は任意なので失敗しても無視する */
+        }
+    }, delay);
+}
+
 socket.on("connect", () => {
+    scheduleWarmUp(1500);
+
     elements.connectionStatus.textContent =
         "サーバー接続済み";
 
@@ -1166,6 +1190,12 @@ function openSettings(mode) {
     showScreen("settingsScreen");
 }
 
+
+if (elements.settingsForm) {
+    elements.settingsForm.addEventListener("change", () => {
+        scheduleWarmUp(1000);
+    });
+}
 
 function readSettings() {
     const formData =
@@ -2645,7 +2675,34 @@ function requestGameAnalysis() {
 });
 }
 
+function renderAnalysisModeBanner(result) {
+    const banner = document.getElementById("analysisModeBanner");
+
+    if (!banner) {
+        return;
+    }
+
+    const mode = result.analysisMode ?? null;
+
+    banner.hidden = !mode;
+    banner.classList.remove("exact", "partial", "estimate");
+
+    if (!mode) {
+        return;
+    }
+
+    banner.classList.add(mode);
+
+    document.getElementById("analysisModeLabel").textContent =
+        result.analysisModeLabel ?? "";
+
+    document.getElementById("analysisModeDescription").textContent =
+        result.analysisModeDescription ?? "";
+}
+
 function renderAnalysis(result) {
+    renderAnalysisModeBanner(result);
+
     elements.analysisVerdict.textContent =
         result.verdict ?? "判定不能";
 
@@ -2653,9 +2710,11 @@ function renderAnalysis(result) {
         result.startLetter ?? "－";
 
     elements.analysisBestMove.textContent =
-        result.bestMove?.word ??
-        result.bestMove?.name ??
-        "なし";
+        (
+            result.bestMove?.word ??
+            result.bestMove?.name ??
+            "なし"
+        ) + (result.limited ? "（推定）" : "");
 
     elements.analysisDistance.textContent =
         Number.isFinite(
@@ -2734,7 +2793,7 @@ function renderMoveAnalysis(moves) {
             statusText = "不正な手";
         } else if (move.wasBestMove) {
             item.classList.add("best");
-            statusText = "最善手";
+            statusText = move.isLimited ? "推定最善手" : "最善手";
             statusClass = "best";
         } else if (
             move.lostWinningPosition
@@ -2766,6 +2825,21 @@ function renderMoveAnalysis(moves) {
             statusText;
 
         header.appendChild(title);
+
+        const kindBadge =
+            document.createElement("span");
+
+        const isEstimate =
+            move.analysisKind === "estimate" ||
+            move.isLimited === true;
+
+        kindBadge.className =
+            `analysis-kind-badge ${isEstimate ? "estimate" : "exact"}`;
+
+        kindBadge.textContent =
+            isEstimate ? "推定" : "必勝解析";
+
+        header.appendChild(kindBadge);
         header.appendChild(badge);
 
         item.appendChild(header);
@@ -2806,12 +2880,25 @@ function renderMoveAnalysis(moves) {
 
         details.appendChild(
             createAnalysisDetail(
-                "最善手",
+                move.isLimited ? "推定最善手" : "最善手",
                 move.bestMove?.word ??
                 move.bestMove?.name ??
                 "なし"
             )
         );
+
+        if (
+            Number.isFinite(move.moverWinRateBefore) &&
+            Number.isFinite(move.moverWinRateAfter)
+        ) {
+            details.appendChild(
+                createAnalysisDetail(
+                    "推定勝率",
+                    `${Math.round(move.moverWinRateBefore * 100)}% → ` +
+                    `${Math.round(move.moverWinRateAfter * 100)}%`
+                )
+            );
+        }
 
         if (
             Number.isFinite(
@@ -2909,6 +2996,7 @@ function returnToHome() {
 
     resetInterface();
     showScreen("homeScreen");
+    scheduleWarmUp(1500);
 }
 
 function resetGameState() {

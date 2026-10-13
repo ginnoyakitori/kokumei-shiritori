@@ -120,6 +120,12 @@ function handleMessage(
             );
             break;
 
+        case "warm-up":
+            warmUpJob(
+                message
+            );
+            break;
+
         case "get-room-results":
             getRoomResultsJob(
                 message
@@ -437,6 +443,46 @@ function analyzeGameJob(
 
         precomputedPositionCount:
             preliminaryResults.length
+    });
+}
+
+
+/* =========================================================
+   開始局面の事前解析(ウォームアップ)
+========================================================= */
+
+function warmUpJob(
+    message
+) {
+    const settings =
+        normalizeObject(
+            message.settings
+        );
+
+    const result =
+        analyzer.warmUp(
+            settings,
+            {
+                budgetMilliseconds:
+                    normalizePositiveInteger(
+                        message.budgetMilliseconds,
+                        8000
+                    )
+            }
+        );
+
+    parentPort.postMessage({
+        success:
+            true,
+
+        type:
+            "warm-up-result",
+
+        jobId:
+            message.jobId ??
+            null,
+
+        result
     });
 }
 

@@ -2114,3 +2114,48 @@ button.immediate-loss-word:hover
             0.01ms !important;
     }
 }
+
+/* 解析の種別(必勝解析 / 推定解析) */
+.analysis-mode-banner {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    border-left: 6px solid #888;
+    background: #f2f2f2;
+}
+
+.analysis-mode-banner.exact {
+    border-left-color: #2e7d32;
+    background: #e8f5e9;
+}
+
+.analysis-mode-banner.partial {
+    border-left-color: #f9a825;
+    background: #fff8e1;
+}
+
+.analysis-mode-banner.estimate {
+    border-left-color: #ef6c00;
+    background: #fff3e0;
+}
+
+.analysis-kind-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.analysis-kind-badge.exact {
+    background: #e8f5e9;
+    color: #1b5e20;
+}
+
+.analysis-kind-badge.estimate {
+    background: #fff3e0;
+    color: #e65100;
+}
