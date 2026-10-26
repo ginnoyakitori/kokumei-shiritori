@@ -359,6 +359,20 @@ io.on("connection", socket => {
         startCountdown(roomId);
     });
 
+    /* マッチングのキャンセル */
+    socket.on("cancelMatching", () => {
+        /* すでに対局が成立している場合は、キャンセルできない */
+        const roomId = matchmaking.getPlayerRoom(socket.id);
+
+        if (roomId && onlineGames.has(roomId)) {
+            return;
+        }
+
+        matchmaking.leaveQueue(socket.id);
+
+        socket.emit("matchingCancelled");
+    });
+
         /* オンライン対戦で単語を出す */
     socket.on("playWord", data => {
         const roomId = String(data?.roomId ?? "");
