@@ -571,6 +571,34 @@
                             </label>
                         </fieldset>
 
+                        <!-- プレイヤー名(オンライン対戦のみ) -->
+                        <fieldset
+                            id="playerNameGroup"
+                            class="setting-group"
+                            hidden
+                        >
+                            <legend>
+                                6．プレイヤー名
+                            </legend>
+
+                            <label
+                                for="playerNameInput"
+                                class="option-description"
+                            >
+                                対戦相手に表示される名前です(12文字まで・空欄なら「プレイヤー」)
+                            </label>
+
+                            <input
+                                id="playerNameInput"
+                                class="word-input"
+                                type="text"
+                                name="playerName"
+                                maxlength="12"
+                                autocomplete="nickname"
+                                placeholder="例：たろう"
+                            >
+                        </fieldset>
+
                         <div
                             id="settingsError"
                             class="error-message"

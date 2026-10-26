@@ -130,6 +130,66 @@ function sanitizeCpuState(raw) {
 }
 
 /**
+ * プレイヤー名を安全な表示用の文字列にする(12文字まで)。
+ */
+const DEFAULT_PLAYER_NAME = "プレイヤー";
+const MAX_PLAYER_NAME = 12;
+
+function sanitizePlayerName(value) {
+    const cleaned = String(value ?? "")
+        .replace(/[\u0000-\u001f\u007f<>]/g, "")
+        .trim();
+
+    const name = Array.from(cleaned)
+        .slice(0, MAX_PLAYER_NAME)
+        .join("")
+        .trim();
+
+    return name || DEFAULT_PLAYER_NAME;
+}
+
+/** 接続が切れた待機者を待機列から取り除く */
+function purgeStaleWaitingPlayers() {
+    for (const player of matchmaking.getWaitingPlayers()) {
+        if (!io.sockets.sockets.has(player.socketId)) {
+            matchmaking.leaveQueue(player.socketId);
+        }
+    }
+}
+
+/**
+ * 対局が始まる前(カウントダウン中)に相手が切断したとき、
+ * 勝敗をつけずに対局を取りやめる。残った側は再マッチングされる。
+ */
+function abortMatch(roomId, leftSocketId) {
+    const game = onlineGames.get(roomId);
+
+    if (!game || game.finished) {
+        return;
+    }
+
+    game.finished = true;
+
+    clearTurnTimer(roomId);
+    clearCountdown(roomId);
+
+    for (const playerId of game.players) {
+        if (playerId === leftSocketId) {
+            continue;
+        }
+
+        io.sockets.sockets.get(playerId)?.emit("matchAborted", {
+            message: "対戦相手が切断したため、対局を取りやめました。"
+        });
+    }
+
+    io.in(roomId).socketsLeave(roomId);
+
+    matchmaking.removeRoom(roomId);
+    onlineGames.delete(roomId);
+}
+
+/**
  * ソケットごとの簡易レート制限。
  * windowMs の間に max 回まで許可する。
  */
@@ -239,6 +299,19 @@ io.on("connection", socket => {
 
            /* オンライン対戦のマッチング */
     socket.on("findMatch", rawSettings => {
+        if (!allow(socket, "findMatch", 6, 10000)) {
+            socket.emit("matchingError", {
+                message: "操作が多すぎます。少し待ってからお試しください。"
+            });
+
+            return;
+        }
+
+        socket.data.playerName = sanitizePlayerName(rawSettings?.playerName);
+
+        /* 切断済みの待機者とは組まない */
+        purgeStaleWaitingPlayers();
+
         /*
          * 対局中は新しいマッチングを受け付けない。
          * 対局情報が残っているだけ(対局はすでに終了)の場合は片付ける。
@@ -343,7 +416,15 @@ io.on("connection", socket => {
             timer: 20,
             started: false,
             finished: false,
-            createdAt: Date.now()
+            createdAt: Date.now(),
+
+            names: Object.fromEntries(
+                players.map(id => [
+                    id,
+                    io.sockets.sockets.get(id)?.data.playerName ??
+                        DEFAULT_PLAYER_NAME
+                ])
+            )
         };
 
         onlineGames.set(roomId, game);
@@ -353,6 +434,7 @@ io.on("connection", socket => {
             players,
             startLetter,
             firstPlayer,
+            names: game.names,
             settings: matchedSettings
         });
 
@@ -803,10 +885,16 @@ socket.on("getNextLetter", data => {
             playerId => playerId !== socket.id
         );
 
+        /* 対局が始まる前なら、勝敗をつけずに取りやめる */
+        if (!game.started) {
+            abortMatch(roomId, socket.id);
+            return;
+        }
+
         finishOnlineGame(roomId, {
             winner: opponentId ?? null,
             loser: socket.id,
-            reason: "対戦相手が切断しました。"
+            reason: `${game.names?.[socket.id] ?? "対戦相手"}が切断しました。`
         });
     });
 });
@@ -858,6 +946,7 @@ function startCountdown(roomId) {
             usedWords: currentGame.usedWords,
             history: currentGame.history,
             turn: currentGame.turn,
+            names: currentGame.names,
             timer: 20
         });
 
@@ -959,6 +1048,7 @@ function finishOnlineGame(roomId, result) {
         reason: result.reason ?? "対局が終了しました。",
         lastWord: result.lastWord ?? null,
         startLetter: game.history[0]?.requiredLetter ?? null,
+        names: game.names ?? {},
         history: game.history,
         settings: game.settings
     });

@@ -61,6 +61,12 @@ const elements = {
     cpuSettingsGroup:
         document.getElementById("cpuSettingsGroup"),
 
+    playerNameGroup:
+        document.getElementById("playerNameGroup"),
+
+    playerNameInput:
+        document.getElementById("playerNameInput"),
+
     guideSettingsGroup:
         document.getElementById("guideSettingsGroup"),
 
@@ -247,6 +253,9 @@ const gameState = {
     players: [],
     firstPlayer: null,
 
+    /* socketId => 表示名(オンライン対戦) */
+    playerNames: {},
+
     startLetter: "",
     currentLetter: "",
 
@@ -263,6 +272,38 @@ const gameState = {
 
     lastResult: null
 };
+
+/* =========================================================
+   プレイヤー名
+========================================================= */
+
+const PLAYER_NAME_KEY = "shiritori.playerName";
+
+function loadSavedPlayerName() {
+    try {
+        return localStorage.getItem(PLAYER_NAME_KEY) ?? "";
+    } catch {
+        return "";
+    }
+}
+
+function savePlayerName(name) {
+    try {
+        localStorage.setItem(PLAYER_NAME_KEY, name);
+    } catch {
+        /* 保存できなくても対戦には影響しない */
+    }
+}
+
+function getOpponentName() {
+    for (const [id, name] of Object.entries(gameState.playerNames)) {
+        if (id !== socket.id) {
+            return name;
+        }
+    }
+
+    return "対戦相手";
+}
 
 /*
  * getAvailableWordsイベントは初心者ガイドだけでなく、
@@ -520,18 +561,55 @@ socket.on("disconnect", () => {
         "disconnected"
     );
 
+    /*
+     * 再接続するとSocket IDが変わり、サーバー側の対局・待機は
+     * 失われている。ここで画面を整理して、宙に浮いた状態を防ぐ。
+     */
     if (
         gameState.mode === "online" &&
-        gameState.started &&
         !gameState.finished
     ) {
-        setInputEnabled(false);
+        if (gameState.started) {
+            finishGame({
+                winner: null,
+                loser: null,
+                reason:
+                    "サーバーとの接続が切れたため、対局を終了しました。",
+                history: gameState.history,
+                settings: gameState.settings,
+                startLetter: gameState.startLetter
+            });
+        } else if (gameState.roomId || !elements.matchingScreen.hidden || !elements.countdownScreen.hidden) {
+            resetGameState();
 
-        showMoveMessage(
-            "サーバーとの接続が切れました。",
-            "error"
-        );
+            showScreen("settingsScreen");
+
+            showModal(
+                "接続が切れました",
+                "サーバーとの接続が切れたため、マッチングを中止しました。接続が戻ったら、もう一度開始してください。"
+            );
+        }
     }
+});
+
+/* 対局開始前に相手が切断した: 自動で次の相手を探す */
+socket.on("matchAborted", data => {
+    if (
+        gameState.mode !== "online" ||
+        gameState.started ||
+        gameState.finished
+    ) {
+        return;
+    }
+
+    resetGameState();
+
+    elements.matchingStatus.textContent =
+        `${data?.message ?? "対戦相手が切断しました。"}もう一度、対戦相手を探しています。`;
+
+    showScreen("matchingScreen");
+
+    socket.emit("findMatch", gameState.settings);
 });
 
 socket.on("connect_error", () => {
@@ -585,6 +663,9 @@ socket.on("matchFound", data => {
     gameState.firstPlayer =
         data.firstPlayer;
 
+    gameState.playerNames =
+        data.names ?? {};
+
     gameState.startLetter =
         data.startLetter;
 
@@ -603,8 +684,8 @@ socket.on("matchFound", data => {
 
     elements.countdownTurnMessage.textContent =
         data.firstPlayer === socket.id
-            ? "あなたが先手です"
-            : "対戦相手が先手です";
+            ? `あなたが先手です(対戦相手：${getOpponentName()})`
+            : `${getOpponentName()}が先手です`;
 
     elements.countdownNumber.textContent = "3";
 
@@ -631,6 +712,10 @@ socket.on("startGame", state => {
     gameState.players =
         state.players ??
         gameState.players;
+
+    gameState.playerNames =
+        state.names ??
+        gameState.playerNames;
 
     gameState.settings = {
         ...(gameState.settings ?? {}),
@@ -829,6 +914,10 @@ socket.on("wordAccepted", data => {
 });
 
 socket.on("gameOver", data => {
+    if (data?.names) {
+        gameState.playerNames = data.names;
+    }
+
     finishGame({
         winner:
             data.winner ?? null,
@@ -1187,6 +1276,17 @@ function openSettings(mode) {
 
     elements.settingsError.hidden = true;
 
+    elements.playerNameGroup.hidden =
+        mode !== "online";
+
+    if (
+        mode === "online" &&
+        !elements.playerNameInput.value
+    ) {
+        elements.playerNameInput.value =
+            loadSavedPlayerName();
+    }
+
     showScreen("settingsScreen");
 }
 
@@ -1233,7 +1333,14 @@ function readSettings() {
             gameState.mode === "cpu" &&
             formData.get(
                 "guideEnabled"
-            ) === "true"
+            ) === "true",
+
+        playerName:
+            gameState.mode === "online"
+                ? String(formData.get("playerName") ?? "")
+                    .trim()
+                    .slice(0, 12)
+                : ""
     };
 }
 
@@ -1252,6 +1359,10 @@ async function handleSettingsSubmit(event) {
 
     gameState.settings =
         readSettings();
+
+    if (gameState.mode === "online") {
+        savePlayerName(gameState.settings.playerName);
+    }
 
     resetGameState();
 
@@ -2340,7 +2451,7 @@ function updateGameInterface() {
         elements.turnDisplay.textContent =
             gameState.mode === "cpu"
                 ? "CPUの番です"
-                : "対戦相手の番です";
+                : `${getOpponentName()}の番です`;
 
         elements.turnDisplay.classList.add(
             "opponent-turn"
@@ -2488,7 +2599,7 @@ function createPlayerLabel(
     }
 
     if (player) {
-        return "対戦相手";
+        return gameState.playerNames[player] ?? "対戦相手";
     }
 
     return index % 2 === 0
@@ -3003,6 +3114,7 @@ function resetGameState() {
     gameState.roomId = null;
     gameState.players = [];
     gameState.firstPlayer = null;
+    gameState.playerNames = {};
 
     gameState.startLetter = "";
     gameState.currentLetter = "";
